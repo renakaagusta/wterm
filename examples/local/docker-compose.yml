@@ -1,0 +1,30 @@
+services:
+  wterm:
+    build:
+      context: ../../
+      dockerfile: examples/local/Dockerfile
+    container_name: wterm
+    restart: unless-stopped
+    volumes:
+      - wterm-data:/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - HOST=0.0.0.0
+      - WORKSPACE_FILE=/data/workspace.json
+      - SHELL=/bin/bash
+      - WTERM_PASSWORD=${WTERM_PASSWORD}
+      - TOKEN_SECRET=${TOKEN_SECRET}
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: wterm-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - wterm
+
+volumes:
+  wterm-data:
