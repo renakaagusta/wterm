@@ -98,7 +98,7 @@ const SCROLLBACK_CHUNKS = 500;
 interface Session {
   id: string;
   ptyProcess: pty.IPty;
-  ws: WebSocket | null;
+  clients: Set<WebSocket>;
   scrollback: string[];
   lastActivity: number;
 }
@@ -108,7 +108,7 @@ const sessions = new Map<string, Session>();
 setInterval(() => {
   const now = Date.now();
   for (const [id, session] of sessions) {
-    if (!session.ws && now - session.lastActivity > SESSION_IDLE_MS) {
+    if (session.clients.size === 0 && now - session.lastActivity > SESSION_IDLE_MS) {
       session.ptyProcess.kill();
       sessions.delete(id);
       console.log(`[session ${id.slice(0, 8)}] cleaned up after idle`);
@@ -125,29 +125,39 @@ function cleanEnv(): Record<string, string> {
 }
 
 function createSession(id: string): Session {
-  const shell = process.env.SHELL || (process.platform === "win32" ? "cmd.exe" : "/bin/bash");
-  const ptyProcess = pty.spawn(shell, [], {
+  const shellUser = process.env.SHELL_USER;
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  const usesSu = isRoot && !!shellUser;
+
+  const cmd = usesSu ? "su" : (process.env.SHELL || (process.platform === "win32" ? "cmd.exe" : "/bin/bash"));
+  const args = usesSu ? ["-", shellUser!] : [];
+  const cwd = usesSu ? "/" : (process.env.HOME || "/");
+
+  const ptyProcess = pty.spawn(cmd, args, {
     name: "xterm-256color",
     cols: 80,
     rows: 24,
-    cwd: process.env.HOME || "/",
+    cwd,
     env: cleanEnv(),
   });
 
-  const session: Session = { id, ptyProcess, ws: null, scrollback: [], lastActivity: Date.now() };
+  const session: Session = { id, ptyProcess, clients: new Set(), scrollback: [], lastActivity: Date.now() };
 
   ptyProcess.onData((data) => {
     session.lastActivity = Date.now();
     session.scrollback.push(data);
     if (session.scrollback.length > SCROLLBACK_CHUNKS)
       session.scrollback = session.scrollback.slice(-SCROLLBACK_CHUNKS);
-    if (session.ws?.readyState === WebSocket.OPEN) session.ws.send(data);
+    for (const client of session.clients)
+      if (client.readyState === WebSocket.OPEN) client.send(data);
   });
 
   ptyProcess.onExit(() => {
-    if (session.ws?.readyState === WebSocket.OPEN) {
-      session.ws.send("\r\n\x1b[31m[process exited]\x1b[0m\r\n");
-      session.ws.close();
+    for (const client of session.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send("\r\n\x1b[31m[process exited]\x1b[0m\r\n");
+        client.close();
+      }
     }
     sessions.delete(id);
     console.log(`[session ${id.slice(0, 8)}] process exited`);
@@ -158,14 +168,15 @@ function createSession(id: string): Session {
   return session;
 }
 
+const DEFAULT_SESSION_ID = "s1";
+
 function attachToSession(session: Session, ws: WebSocket) {
-  if (session.ws && session.ws !== ws) session.ws.close();
-  const hadWs = !!session.ws;
-  session.ws = ws;
+  const isNewClient = !session.clients.has(ws);
+  session.clients.add(ws);
 
   if (session.scrollback.length > 0) {
     ws.send(session.scrollback.join(""));
-    if (hadWs) ws.send("\r\n\x1b[90m─── reconnected ───\x1b[0m\r\n");
+    if (!isNewClient) ws.send("\r\n\x1b[90m─── reconnected ───\x1b[0m\r\n");
   }
 
   ws.on("message", (msg: Buffer | string) => {
@@ -179,11 +190,9 @@ function attachToSession(session: Session, ws: WebSocket) {
   });
 
   ws.on("close", () => {
-    if (session.ws === ws) {
-      session.ws = null;
-      session.lastActivity = Date.now();
-      console.log(`[session ${session.id.slice(0, 8)}] client disconnected, session kept alive`);
-    }
+    session.clients.delete(ws);
+    session.lastActivity = Date.now();
+    console.log(`[session ${session.id.slice(0, 8)}] client disconnected (${session.clients.size} remaining)`);
   });
 }
 
@@ -334,8 +343,8 @@ const server = createServer((req, res) => {
   if (pathname === "/api/login"  && req.method === "POST") return handleLogin(req, res);
   if (pathname === "/api/logout" && req.method === "POST") return handleLogout(req, res);
 
-  // Always serve static assets so the login page loads unauthenticated
-  if (serveStatic(req, res)) return;
+  // Always serve static assets so the login page loads unauthenticated (skip API paths)
+  if (!pathname?.startsWith("/api/") && serveStatic(req, res)) return;
 
   // Everything below requires auth
   if (!isAuthenticated(req)) return unauthorized(res);
@@ -356,11 +365,11 @@ server.on("upgrade", (req, socket, head) => {
   if (!isAuthenticated(req)) { socket.destroy(); return; }
 
   wss.handleUpgrade(req, socket, head, (ws) => {
-    const sessionId = typeof query.sessionId === "string" ? query.sessionId : undefined;
-    let session = sessionId ? sessions.get(sessionId) : undefined;
+    const sessionId = typeof query.sessionId === "string" ? query.sessionId : DEFAULT_SESSION_ID;
+    let session = sessions.get(sessionId);
 
     if (!session) {
-      const id = sessionId || randomUUID();
+      const id = sessionId;
       try {
         session = createSession(id);
       } catch (err) {

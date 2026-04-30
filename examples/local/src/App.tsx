@@ -11,7 +11,7 @@ type PaneNode = TerminalPane | SplitPane;
 
 let _nextId = 1;
 const newId = () => String(_nextId++);
-const newTermPane = (): TerminalPane => ({ kind: "terminal", id: newId(), sessionId: crypto.randomUUID() });
+const newTermPane = (): TerminalPane => { const id = newId(); return { kind: "terminal", id, sessionId: `s${id}` }; };
 
 function collectTerminals(node: PaneNode): TerminalPane[] {
   if (node.kind === "terminal") return [node];
