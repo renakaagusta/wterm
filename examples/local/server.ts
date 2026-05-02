@@ -2,7 +2,7 @@ import { createServer, IncomingMessage, ServerResponse } from "http";
 import { parse } from "url";
 import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import { exec } from "child_process";
-import { readFileSync, writeFileSync, existsSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, statSync, readlinkSync, readdirSync } from "fs";
 import { join, extname, dirname } from "path";
 import { fileURLToPath } from "url";
 import os from "os";
@@ -302,6 +302,46 @@ function handlePutWorkspace(req: IncomingMessage, res: ServerResponse) {
   });
 }
 
+// ─── Config ─────────────────────────────────────────────────────────────────
+
+const VSCODE_URL = process.env.VSCODE_URL || "https://code.renakaagusta.dev";
+// Optional path prefix rewrite: "from:to" e.g. "/Users/renakaagusta/Documents/project:/home/project"
+const VSCODE_PATH_MAP = process.env.VSCODE_PATH_MAP || "";
+
+function handleConfig(_req: IncomingMessage, res: ServerResponse) {
+  const [pathFrom, pathTo] = VSCODE_PATH_MAP.includes(":") ? VSCODE_PATH_MAP.split(":") : ["", ""];
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ vscodeUrl: VSCODE_URL, vscodePathFrom: pathFrom, vscodePathTo: pathTo }));
+}
+
+// ─── CWD of a session's shell ────────────────────────────────────────────────
+
+function handleCwd(req: IncomingMessage, res: ServerResponse) {
+  const { query } = parse(req.url || "/", true);
+  const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
+  const session = sessions.get(sessionId);
+  if (!session) { res.writeHead(404); res.end("session not found"); return; }
+
+  try {
+    const pid = session.ptyProcess.pid;
+    // On Linux, find the foreground child process for a more accurate CWD.
+    // Fall back to the shell's own CWD if no children are found.
+    let targetPid = pid;
+    try {
+      const children = readdirSync(`/proc/${pid}/task/${pid}/children`)?.[0]
+        ? readFileSync(`/proc/${pid}/task/${pid}/children`, "utf-8").trim().split(/\s+/).filter(Boolean)
+        : [];
+      if (children.length > 0) targetPid = parseInt(children[children.length - 1]);
+    } catch {}
+    const cwd = readlinkSync(`/proc/${targetPid}/cwd`);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ cwd }));
+  } catch {
+    res.writeHead(500);
+    res.end("could not read cwd");
+  }
+}
+
 // ─── Static file serving (production) ───────────────────────────────────────
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -353,6 +393,8 @@ const server = createServer((req, res) => {
   if (pathname === "/api/stats") return handleStats(req, res);
   if (pathname === "/api/workspace" && req.method === "GET") return handleGetWorkspace(req, res);
   if (pathname === "/api/workspace" && req.method === "PUT") return handlePutWorkspace(req, res);
+  if (pathname === "/api/config") return handleConfig(req, res);
+  if (pathname === "/api/cwd") return handleCwd(req, res);
   res.writeHead(404);
   res.end("not found");
 });

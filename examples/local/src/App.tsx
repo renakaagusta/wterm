@@ -97,12 +97,24 @@ async function fetchWorkspace(): Promise<Workspace | null> {
   } catch { return null; }
 }
 
-function saveWorkspace(root: PaneNode, focusedId: string) {
+function saveWorkspace(root: PaneNode, focusedId: string, names: Record<string, string>) {
   fetch("/api/workspace", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root, focusedId }),
+    body: JSON.stringify({ root, focusedId, names }),
   }).catch(() => {});
+}
+
+// ─── VS Code config ───────────────────────────────────────────────────────────
+
+interface VscodeConfig { vscodeUrl: string; vscodePathFrom: string; vscodePathTo: string }
+
+async function fetchVscodeConfig(): Promise<VscodeConfig> {
+  try {
+    const r = await fetch("/api/config");
+    if (r.ok) return await r.json();
+  } catch {}
+  return { vscodeUrl: "https://code.renakaagusta.dev", vscodePathFrom: "", vscodePathTo: "" };
 }
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
@@ -124,10 +136,15 @@ function Bar({ pct }: { pct: number }) {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+let _termCounter = 0;
+const nextTermName = () => `Terminal ${++_termCounter}`;
+
 export default function App() {
   const [auth, setAuth] = useState<"loading" | "ok" | "login">("loading");
   const [root, setRoot] = useState<PaneNode | null>(null);
   const [focusedId, setFocusedId] = useState<string>("");
+  const [names, setNames] = useState<Record<string, string>>({});
+  const [vscodeConfig, setVscodeConfig] = useState<VscodeConfig>({ vscodeUrl: "", vscodePathFrom: "", vscodePathTo: "" });
   const [stats, setStats] = useState<Stats | null>(null);
   const paneRefs = useRef(new Map<string, PaneHandle>());
   const containerRef = useRef<HTMLDivElement>(null);
@@ -140,18 +157,26 @@ export default function App() {
       .catch(() => setAuth("login"));
   }, []);
 
-  // Load workspace from server once authenticated
+  // Load workspace + vscode config once authenticated
   useEffect(() => {
     if (auth !== "ok") return;
+    fetchVscodeConfig().then(setVscodeConfig);
     fetchWorkspace().then((ws) => {
       if (ws?.root) {
         _nextId = maxId(ws.root) + 1;
         setRoot(ws.root);
         setFocusedId(ws.focusedId ?? collectIds(ws.root)[0]);
+        // Restore saved names, fill any gaps with defaults
+        const saved = ws.names ?? {};
+        const allIds = collectIds(ws.root);
+        const filled: Record<string, string> = {};
+        allIds.forEach((id) => { filled[id] = saved[id] ?? nextTermName(); });
+        setNames(filled);
       } else {
         const pane = newTermPane();
         setRoot(pane);
         setFocusedId(pane.id);
+        setNames({ [pane.id]: nextTermName() });
       }
     });
   }, [auth]);
@@ -160,8 +185,8 @@ export default function App() {
   useEffect(() => {
     if (!root || !focusedId) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveWorkspace(root, focusedId), 400);
-  }, [root, focusedId]);
+    saveTimer.current = setTimeout(() => saveWorkspace(root, focusedId, names), 400);
+  }, [root, focusedId, names]);
 
   useEffect(() => {
     if (auth !== "ok") return;
@@ -180,8 +205,28 @@ export default function App() {
     setAuth("login");
   }
 
-  const splitV = useCallback(() => setRoot((r) => r ? splitPane(r, focusedId, "v") : r), [focusedId]);
-  const splitH = useCallback(() => setRoot((r) => r ? splitPane(r, focusedId, "h") : r), [focusedId]);
+  const splitV = useCallback(() => {
+    setRoot((r) => {
+      if (!r) return r;
+      const result = splitPane(r, focusedId, "v");
+      // Find the new pane id and assign a default name
+      const before = new Set(collectIds(r));
+      const newId = collectIds(result).find((id) => !before.has(id));
+      if (newId) setNames((n) => ({ ...n, [newId]: nextTermName() }));
+      return result;
+    });
+  }, [focusedId]);
+
+  const splitH = useCallback(() => {
+    setRoot((r) => {
+      if (!r) return r;
+      const result = splitPane(r, focusedId, "h");
+      const before = new Set(collectIds(r));
+      const newId = collectIds(result).find((id) => !before.has(id));
+      if (newId) setNames((n) => ({ ...n, [newId]: nextTermName() }));
+      return result;
+    });
+  }, [focusedId]);
 
   const closePane = useCallback(() => {
     setRoot((r) => {
@@ -189,9 +234,14 @@ export default function App() {
       const next = removePane(r, focusedId);
       if (!next) return r;
       setFocusedId(collectIds(next)[0]);
+      setNames((n) => { const m = { ...n }; delete m[focusedId]; return m; });
       return next;
     });
   }, [focusedId]);
+
+  const renamePane = useCallback((id: string, name: string) => {
+    setNames((n) => ({ ...n, [id]: name }));
+  }, []);
 
   const sendAppctl = useCallback(() => {
     paneRefs.current.get(focusedId)?.send("appctl\r");
@@ -285,6 +335,11 @@ export default function App() {
               sessionId={sessionId}
               focused={id === focusedId}
               onFocus={() => setFocusedId(id)}
+              name={names[id] ?? "Terminal"}
+              onRename={(name) => renamePane(id, name)}
+              vscodeUrl={vscodeConfig.vscodeUrl}
+              vscodePathFrom={vscodeConfig.vscodePathFrom}
+              vscodePathTo={vscodeConfig.vscodePathTo}
             />
           </div>
         ))}

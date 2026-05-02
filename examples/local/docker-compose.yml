@@ -10,6 +10,7 @@ services:
       - /Users/renakaagusta:/Users/renakaagusta
       - /var/run/docker.sock:/var/run/docker.sock
       - /Users/renakaagusta/Documents/project/appctl:/opt/appctl:ro
+      - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -21,6 +22,10 @@ services:
       - WTERM_PASSWORD=${WTERM_PASSWORD}
       - TOKEN_SECRET=${TOKEN_SECRET}
       - DOCKER_HOST=unix:///var/run/docker.sock
+      - SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock
+      - GH_TOKEN=${GH_TOKEN}
+      - VSCODE_URL=https://code.renakaagusta.dev
+      - VSCODE_PATH_MAP=/Users/renakaagusta/Documents/project:/home/project
 
   cloudflared:
     image: cloudflare/cloudflared:latest
