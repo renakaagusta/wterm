@@ -8,6 +8,8 @@ export interface PaneHandle {
   send: (data: string) => void;
 }
 
+export interface GitInfo { branch: string | null; added: number; removed: number }
+
 interface PaneTerminalProps {
   paneId: string;
   sessionId: string;
@@ -18,6 +20,8 @@ interface PaneTerminalProps {
   vscodeUrl: string;
   vscodePathFrom: string;
   vscodePathTo: string;
+  showTopbar?: boolean;
+  gitInfo?: GitInfo;
 }
 
 // ─── Topbar ──────────────────────────────────────────────────────────────────
@@ -30,9 +34,10 @@ interface TopbarProps {
   vscodePathFrom: string;
   vscodePathTo: string;
   onFocus: () => void;
+  gitInfo?: GitInfo;
 }
 
-function PaneTopbar({ sessionId, name, onRename, vscodeUrl, vscodePathFrom, vscodePathTo, onFocus }: TopbarProps) {
+function PaneTopbar({ sessionId, name, onRename, vscodeUrl, vscodePathFrom, vscodePathTo, onFocus, gitInfo }: TopbarProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -67,7 +72,6 @@ function PaneTopbar({ sessionId, name, onRename, vscodeUrl, vscodePathFrom, vsco
       className="flex h-7 shrink-0 items-center gap-1 border-b border-zinc-800 bg-zinc-900 px-2 select-none"
       onClick={onFocus}
     >
-      {/* Editable name */}
       <div className="flex min-w-0 flex-1 items-center gap-1">
         {editing ? (
           <input
@@ -93,9 +97,15 @@ function PaneTopbar({ sessionId, name, onRename, vscodeUrl, vscodePathFrom, vsco
         >
           {editing ? <Check size={11} /> : <Pencil size={11} />}
         </button>
+        {gitInfo?.branch && (
+          <div className="ml-1 flex shrink-0 items-center gap-1 text-[10px]">
+            <span className="text-zinc-600">⎇ {gitInfo.branch}</span>
+            {gitInfo.added > 0 && <span className="text-green-600">+{gitInfo.added}</span>}
+            {gitInfo.removed > 0 && <span className="text-red-500">-{gitInfo.removed}</span>}
+          </div>
+        )}
       </div>
 
-      {/* VS Code button */}
       {vscodeUrl && (
         <button
           onClick={openInVscode}
@@ -112,7 +122,7 @@ function PaneTopbar({ sessionId, name, onRename, vscodeUrl, vscodePathFrom, vsco
 // ─── Pane ────────────────────────────────────────────────────────────────────
 
 export const PaneTerminal = forwardRef<PaneHandle, PaneTerminalProps>(
-  function PaneTerminal({ sessionId, focused, onFocus, name, onRename, vscodeUrl, vscodePathFrom, vscodePathTo }, ref) {
+  function PaneTerminal({ sessionId, focused, onFocus, name, onRename, vscodeUrl, vscodePathFrom, vscodePathTo, showTopbar = true, gitInfo }, ref) {
     const [connected, setConnected] = useState(false);
     const { ref: termRef, write } = useTerminal();
     const wsRef = useRef<WebSocket | null>(null);
@@ -153,15 +163,18 @@ export const PaneTerminal = forwardRef<PaneHandle, PaneTerminalProps>(
         {focused && (
           <div className="pointer-events-none absolute inset-0 z-10 rounded-sm ring-1 ring-blue-500/60" />
         )}
-        <PaneTopbar
-          sessionId={sessionId}
-          name={name}
-          onRename={onRename}
-          vscodeUrl={vscodeUrl}
-          vscodePathFrom={vscodePathFrom}
-          vscodePathTo={vscodePathTo}
-          onFocus={onFocus}
-        />
+        {showTopbar && (
+          <PaneTopbar
+            sessionId={sessionId}
+            name={name}
+            onRename={onRename}
+            vscodeUrl={vscodeUrl}
+            vscodePathFrom={vscodePathFrom}
+            vscodePathTo={vscodePathTo}
+            onFocus={onFocus}
+            gitInfo={gitInfo}
+          />
+        )}
         {!connected && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70">
             <button

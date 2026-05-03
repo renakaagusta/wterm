@@ -1,8 +1,8 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { parse } from "url";
 import { randomUUID, createHmac, timingSafeEqual } from "crypto";
-import { exec } from "child_process";
-import { readFileSync, writeFileSync, existsSync, statSync, readlinkSync, readdirSync } from "fs";
+import { exec, execFile } from "child_process";
+import { readFileSync, writeFileSync, existsSync, statSync, readlinkSync, readdirSync, createReadStream } from "fs";
 import { join, extname, dirname } from "path";
 import { fileURLToPath } from "url";
 import os from "os";
@@ -101,6 +101,7 @@ interface Session {
   clients: Set<WebSocket>;
   scrollback: string[];
   lastActivity: number;
+  cwd?: string; // tracked via OSC 7 sequences from the shell
 }
 
 const sessions = new Map<string, Session>();
@@ -124,27 +125,67 @@ function cleanEnv(): Record<string, string> {
   return env;
 }
 
+function resolveUid(username: string): { uid: number; gid: number; home: string } | null {
+  try {
+    // Read /etc/passwd to resolve uid/gid/home without spawning a process
+    const passwd = readFileSync("/etc/passwd", "utf-8");
+    for (const line of passwd.split("\n")) {
+      const parts = line.split(":");
+      if (parts[0] === username) {
+        return { uid: parseInt(parts[2]), gid: parseInt(parts[3]), home: parts[5] };
+      }
+    }
+  } catch {}
+  return null;
+}
+
 function createSession(id: string): Session {
   const shellUser = process.env.SHELL_USER;
   const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-  const usesSu = isRoot && !!shellUser;
 
-  const cmd = usesSu ? "su" : (process.env.SHELL || (process.platform === "win32" ? "cmd.exe" : "/bin/bash"));
-  const args = usesSu ? ["-", shellUser!] : [];
-  const cwd = usesSu ? "/" : (process.env.HOME || "/");
+  let uid: number | undefined;
+  let gid: number | undefined;
+  let home: string = process.env.HOME || "/";
 
-  const ptyProcess = pty.spawn(cmd, args, {
+  if (isRoot && shellUser) {
+    const resolved = resolveUid(shellUser);
+    if (resolved) { uid = resolved.uid; gid = resolved.gid; home = resolved.home; }
+  }
+
+  const shell = process.env.SHELL || (process.platform === "win32" ? "cmd.exe" : "/bin/bash");
+  const osc7Cmd = `printf '\\033]7;file://%s%s\\007' "$(hostname)" "$(pwd)"`;
+  const baseEnv = cleanEnv();
+  const existingPrompt = baseEnv.PROMPT_COMMAND || "";
+  const env = {
+    ...baseEnv,
+    HOME: home,
+    USER: shellUser || baseEnv.USER || "",
+    PROMPT_COMMAND: existingPrompt ? `${osc7Cmd}; ${existingPrompt}` : osc7Cmd,
+    // Trust all directories — avoids "dubious ownership" errors on bind-mounted macOS paths
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: "*",
+  };
+
+  const ptyProcess = pty.spawn(shell, ["--login"], {
     name: "xterm-256color",
     cols: 80,
     rows: 24,
-    cwd,
-    env: cleanEnv(),
+    cwd: home,
+    env,
+    ...(uid !== undefined ? { uid, gid } : {}),
   });
 
   const session: Session = { id, ptyProcess, clients: new Set(), scrollback: [], lastActivity: Date.now() };
 
   ptyProcess.onData((data) => {
     session.lastActivity = Date.now();
+    // Parse OSC 7 CWD reports: \033]7;file://hostname/path\007 or ...\033\\
+    const osc7 = data.match(/\x1b\]7;file:\/\/[^/]*([^\x07\x1b]*)(?:\x07|\x1b\\)/);
+    if (osc7 && osc7[1]) {
+      const path = decodeURIComponent(osc7[1]);
+      if (path) session.cwd = path;
+    }
     session.scrollback.push(data);
     if (session.scrollback.length > SCROLLBACK_CHUNKS)
       session.scrollback = session.scrollback.slice(-SCROLLBACK_CHUNKS);
@@ -316,30 +357,165 @@ function handleConfig(_req: IncomingMessage, res: ServerResponse) {
 
 // ─── CWD of a session's shell ────────────────────────────────────────────────
 
+// Scan /proc for direct children of a given PID.
+function childPids(ppid: number): number[] {
+  const out: number[] = [];
+  try {
+    for (const entry of readdirSync("/proc")) {
+      const pid = parseInt(entry);
+      if (isNaN(pid)) continue;
+      try {
+        const status = readFileSync(`/proc/${pid}/status`, "utf-8");
+        const m = status.match(/^PPid:\s+(\d+)/m);
+        if (m && parseInt(m[1]) === ppid) out.push(pid);
+      } catch {}
+    }
+  } catch {}
+  return out;
+}
+
+// Walk the process tree depth-first and return the deepest leaf PID.
+// This finds the actual foreground shell (or subprocess) even when the
+// pty process itself is `su` (which starts at cwd="/").
+function deepestLeaf(pid: number, depth = 0): number {
+  if (depth > 8) return pid; // guard against runaway
+  const children = childPids(pid);
+  if (children.length === 0) return pid;
+  // Prefer the last child (most recently spawned, e.g. interactive shell).
+  return deepestLeaf(children[children.length - 1], depth + 1);
+}
+
 function handleCwd(req: IncomingMessage, res: ServerResponse) {
   const { query } = parse(req.url || "/", true);
   const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
   const session = sessions.get(sessionId);
   if (!session) { res.writeHead(404); res.end("session not found"); return; }
 
+  const cwd = session.cwd;
+  if (!cwd) { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ cwd: "/" })); return; }
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ cwd }));
+}
+
+// ─── Directory listing ───────────────────────────────────────────────────────
+
+function handleLs(req: IncomingMessage, res: ServerResponse) {
+  const { query } = parse(req.url || "/", true);
+  const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
+  const pathParam = typeof query.path === "string" ? query.path : "";
+  const session = sessions.get(sessionId);
+  const dir = pathParam || session?.cwd || "/";
+
   try {
-    const pid = session.ptyProcess.pid;
-    // On Linux, find the foreground child process for a more accurate CWD.
-    // Fall back to the shell's own CWD if no children are found.
-    let targetPid = pid;
-    try {
-      const children = readdirSync(`/proc/${pid}/task/${pid}/children`)?.[0]
-        ? readFileSync(`/proc/${pid}/task/${pid}/children`, "utf-8").trim().split(/\s+/).filter(Boolean)
-        : [];
-      if (children.length > 0) targetPid = parseInt(children[children.length - 1]);
-    } catch {}
-    const cwd = readlinkSync(`/proc/${targetPid}/cwd`);
+    const raw = readdirSync(dir, { withFileTypes: true });
+    const items = raw
+      .filter((e) => e.isDirectory() || e.isFile())
+      .map((e) => ({ name: e.name, isDir: e.isDirectory() }))
+      .sort((a, b) => {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ cwd }));
-  } catch {
-    res.writeHead(500);
-    res.end("could not read cwd");
+    res.end(JSON.stringify({ dir, items }));
+  } catch (err) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ dir, items: [], error: String(err) }));
   }
+}
+
+// ─── File content ────────────────────────────────────────────────────────────
+
+function handleFileRead(req: IncomingMessage, res: ServerResponse) {
+  const { query } = parse(req.url || "/", true);
+  const filePath = typeof query.path === "string" ? query.path : "";
+
+  if (!filePath) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "path required" }));
+    return;
+  }
+
+  try {
+    const stat = statSync(filePath);
+    if (stat.size > 2 * 1024 * 1024) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "File too large (>2 MB)", tooLarge: true }));
+      return;
+    }
+    const content = readFileSync(filePath, "utf8");
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ content, size: stat.size }));
+  } catch (err) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: String(err) }));
+  }
+}
+
+// ─── Raw file serving (for PDF preview etc.) ─────────────────────────────────
+
+const MIME_TYPES: Record<string, string> = {
+  ".pdf":  "application/pdf",
+  ".png":  "image/png",
+  ".jpg":  "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif":  "image/gif",
+  ".svg":  "image/svg+xml",
+  ".webp": "image/webp",
+};
+
+function handleFileRaw(req: IncomingMessage, res: ServerResponse) {
+  const { query } = parse(req.url || "/", true);
+  const filePath = typeof query.path === "string" ? query.path : "";
+
+  if (!filePath) { res.writeHead(400); res.end("path required"); return; }
+
+  try {
+    const stat = statSync(filePath);
+    const ext = extname(filePath).toLowerCase();
+    const mime = MIME_TYPES[ext] ?? "application/octet-stream";
+    res.writeHead(200, {
+      "Content-Type": mime,
+      "Content-Length": stat.size,
+      "Content-Disposition": "inline",
+    });
+    createReadStream(filePath).pipe(res);
+  } catch {
+    res.writeHead(404); res.end("not found");
+  }
+}
+
+// ─── Git info for a session's cwd ───────────────────────────────────────────
+
+function handleGitInfo(req: IncomingMessage, res: ServerResponse) {
+  const { query } = parse(req.url || "/", true);
+  const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
+  const session = sessions.get(sessionId);
+  const empty = { branch: null as string | null, added: 0, removed: 0 };
+
+  const cwd = session?.cwd;
+  if (!cwd) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(empty));
+    return;
+  }
+
+  execFile("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], { timeout: 3000 }, (err, branchOut) => {
+    if (err) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(empty));
+      return;
+    }
+    const branch = branchOut.trim();
+    execFile("git", ["-C", cwd, "diff", "HEAD", "--shortstat"], { timeout: 3000 }, (_err2, stat) => {
+      let added = 0, removed = 0;
+      const addM = stat.match(/(\d+) insertion/);
+      const delM = stat.match(/(\d+) deletion/);
+      if (addM) added = parseInt(addM[1]);
+      if (delM) removed = parseInt(delM[1]);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ branch, added, removed }));
+    });
+  });
 }
 
 // ─── Static file serving (production) ───────────────────────────────────────
@@ -395,6 +571,10 @@ const server = createServer((req, res) => {
   if (pathname === "/api/workspace" && req.method === "PUT") return handlePutWorkspace(req, res);
   if (pathname === "/api/config") return handleConfig(req, res);
   if (pathname === "/api/cwd") return handleCwd(req, res);
+  if (pathname === "/api/ls") return handleLs(req, res);
+  if (pathname === "/api/file") return handleFileRead(req, res);
+  if (pathname === "/api/file-raw") return handleFileRaw(req, res);
+  if (pathname === "/api/git-info") return handleGitInfo(req, res);
   res.writeHead(404);
   res.end("not found");
 });
