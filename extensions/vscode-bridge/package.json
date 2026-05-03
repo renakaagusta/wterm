@@ -1,0 +1,50 @@
+{
+  "name": "wterm-bridge",
+  "displayName": "wterm Bridge",
+  "description": "Share VS Code terminals with wterm for remote access",
+  "version": "0.1.0",
+  "publisher": "wterm",
+  "engines": { "vscode": "^1.82.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "wterm-bridge.connect",
+        "title": "wterm: Reconnect Bridge"
+      }
+    ],
+    "configuration": {
+      "title": "wterm Bridge",
+      "properties": {
+        "wtermBridge.serverUrl": {
+          "type": "string",
+          "default": "ws://localhost:3021/ws/bridge",
+          "description": "wterm server WebSocket bridge URL"
+        },
+        "wtermBridge.secret": {
+          "type": "string",
+          "default": "",
+          "description": "Bridge secret (must match BRIDGE_SECRET env var on wterm server)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --platform=node --format=cjs --minify",
+    "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --platform=node --format=cjs --watch",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.82.0",
+    "@types/ws": "^8.5.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.0.0"
+  }
+}

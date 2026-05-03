@@ -28,6 +28,7 @@ services:
       - GH_TOKEN=${GH_TOKEN}
       - VSCODE_URL=https://code.renakaagusta.dev
       - VSCODE_PATH_MAP=/Users/renakaagusta/Documents/project:/home/project
+      - BRIDGE_SECRET=${BRIDGE_SECRET}
 
   cloudflared:
     image: cloudflare/cloudflared:latest

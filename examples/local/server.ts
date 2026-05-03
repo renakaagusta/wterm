@@ -19,6 +19,7 @@ const WTERM_PASSWORD = process.env.WTERM_PASSWORD || "";
 // TOKEN_SECRET should be set in env so tokens survive server restarts.
 // Falls back to a random value (tokens invalidated on restart) if not set.
 const TOKEN_SECRET = process.env.TOKEN_SECRET || randomUUID();
+const BRIDGE_SECRET = process.env.BRIDGE_SECRET || "";
 
 function makeToken(): string {
   return createHmac("sha256", TOKEN_SECRET).update("wterm:auth:v1").digest("hex");
@@ -116,6 +117,106 @@ setInterval(() => {
     }
   }
 }, 60_000);
+
+// ─── VS Code Bridge ───────────────────────────────────────────────────────────
+
+interface ForwardedTerminal {
+  id: string;
+  name: string;
+  workspace: string;
+  bridgeWs: WebSocket;
+  clients: Set<WebSocket>;
+}
+
+const forwardedTerminals = new Map<string, ForwardedTerminal>();
+
+function handleForwardedTerminals(_req: IncomingMessage, res: ServerResponse) {
+  const list = Array.from(forwardedTerminals.values()).map((t) => ({
+    id: t.id,
+    name: t.name,
+    workspace: t.workspace,
+  }));
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(list));
+}
+
+function handleBridgeConnection(ws: WebSocket) {
+  const myIds = new Set<string>();
+
+  ws.on("message", (raw: Buffer | string) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "opened") {
+        const fwd: ForwardedTerminal = {
+          id: msg.terminalId,
+          name: msg.name,
+          workspace: msg.workspace ?? "",
+          bridgeWs: ws,
+          clients: new Set(),
+        };
+        forwardedTerminals.set(msg.terminalId, fwd);
+        myIds.add(msg.terminalId);
+        console.log(`[bridge] terminal opened: ${msg.name} (${msg.terminalId.slice(0, 8)})`);
+      } else if (msg.type === "data") {
+        const fwd = forwardedTerminals.get(msg.terminalId);
+        if (!fwd) return;
+        for (const client of fwd.clients) {
+          if (client.readyState === WebSocket.OPEN) client.send(msg.data);
+        }
+      } else if (msg.type === "closed") {
+        const fwd = forwardedTerminals.get(msg.terminalId);
+        if (fwd) {
+          for (const client of fwd.clients) {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send("\r\n\x1b[33m[VS Code terminal closed]\x1b[0m\r\n");
+              client.close();
+            }
+          }
+          forwardedTerminals.delete(msg.terminalId);
+          myIds.delete(msg.terminalId);
+        }
+      }
+    } catch {}
+  });
+
+  ws.on("close", () => {
+    for (const id of myIds) {
+      const fwd = forwardedTerminals.get(id);
+      if (fwd) {
+        for (const client of fwd.clients) {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send("\r\n\x1b[33m[VS Code disconnected]\x1b[0m\r\n");
+            client.close();
+          }
+        }
+        forwardedTerminals.delete(id);
+      }
+    }
+    console.log("[bridge] extension disconnected");
+  });
+
+  console.log("[bridge] extension connected");
+}
+
+function attachToForwarded(fwd: ForwardedTerminal, ws: WebSocket) {
+  fwd.clients.add(ws);
+
+  // Ask extension to replay its buffer
+  if (fwd.bridgeWs.readyState === WebSocket.OPEN) {
+    fwd.bridgeWs.send(JSON.stringify({ type: "subscribe", terminalId: fwd.id }));
+  }
+
+  ws.on("message", (raw: Buffer | string) => {
+    const input = typeof raw === "string" ? raw : raw.toString("utf-8");
+    if (fwd.bridgeWs.readyState === WebSocket.OPEN) {
+      fwd.bridgeWs.send(JSON.stringify({ type: "input", terminalId: fwd.id, data: input }));
+    }
+  });
+
+  ws.on("close", () => {
+    fwd.clients.delete(ws);
+  });
+}
 
 function cleanEnv(): Record<string, string> {
   const env: Record<string, string> = {};
@@ -575,25 +676,56 @@ const server = createServer((req, res) => {
   if (pathname === "/api/file") return handleFileRead(req, res);
   if (pathname === "/api/file-raw") return handleFileRaw(req, res);
   if (pathname === "/api/git-info") return handleGitInfo(req, res);
+  if (pathname === "/api/forwarded-terminals") return handleForwardedTerminals(req, res);
   res.writeHead(404);
   res.end("not found");
 });
 
 const wss = new WebSocketServer({ noServer: true });
+const bridgeWss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const { pathname, query } = parse(req.url || "/", true);
+
+  // VS Code extension bridge
+  if (pathname === "/ws/bridge") {
+    if (BRIDGE_SECRET) {
+      const secret = req.headers["x-bridge-secret"];
+      if (secret !== BRIDGE_SECRET) { socket.destroy(); return; }
+    }
+    bridgeWss.handleUpgrade(req, socket, head, (ws) => {
+      handleBridgeConnection(ws);
+    });
+    return;
+  }
+
+  // Browser terminal
   if (pathname !== "/api/terminal") { socket.destroy(); return; }
   if (!isAuthenticated(req)) { socket.destroy(); return; }
 
   wss.handleUpgrade(req, socket, head, (ws) => {
     const sessionId = typeof query.sessionId === "string" ? query.sessionId : DEFAULT_SESSION_ID;
-    let session = sessions.get(sessionId);
 
+    // Forwarded VS Code terminal
+    if (sessionId.startsWith("fwd-")) {
+      const terminalId = sessionId.slice(4);
+      const fwd = forwardedTerminals.get(terminalId);
+      if (!fwd) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send("\r\n\x1b[31m[forwarded terminal not available]\x1b[0m\r\n");
+          ws.close();
+        }
+        return;
+      }
+      attachToForwarded(fwd, ws);
+      return;
+    }
+
+    // Normal PTY session
+    let session = sessions.get(sessionId);
     if (!session) {
-      const id = sessionId;
       try {
-        session = createSession(id);
+        session = createSession(sessionId);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (ws.readyState === WebSocket.OPEN) {

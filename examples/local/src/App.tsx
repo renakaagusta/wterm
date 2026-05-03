@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Columns2, Rows2, X, Cpu, MemoryStick, HardDrive, Terminal as TermIcon,
-  Zap, LogOut, Search, Plus, PanelLeft, LayoutTemplate, Code2, Copy, Folder,
+  Zap, LogOut, Search, Plus, PanelLeft, LayoutTemplate, Code2, Copy, Folder, Monitor,
 } from "lucide-react";
 import { PaneTerminal, PaneHandle, GitInfo } from "./Pane";
 import { FileBrowser } from "./FileBrowser";
@@ -13,6 +13,8 @@ import { LoginPage } from "./LoginPage";
 type TerminalPane = { kind: "terminal"; id: string; sessionId: string };
 type SplitPane = { kind: "split"; direction: "h" | "v"; ratio: number; first: PaneNode; second: PaneNode };
 type PaneNode = TerminalPane | SplitPane;
+
+interface ForwardedTerminalInfo { id: string; name: string; workspace: string }
 
 let _nextId = 1;
 const newId = () => String(_nextId++);
@@ -47,6 +49,14 @@ function removePane(node: PaneNode, targetId: string): PaneNode | null {
   if (!first) return second;
   if (!second) return first;
   return { ...node, first, second };
+}
+
+function insertPane(node: PaneNode, targetId: string, newPane: TerminalPane): PaneNode {
+  if (node.kind === "terminal")
+    return node.id === targetId
+      ? { kind: "split", direction: "v", ratio: 0.5, first: node, second: newPane }
+      : node;
+  return { ...node, first: insertPane(node.first, targetId, newPane), second: insertPane(node.second, targetId, newPane) };
 }
 
 function updateRatio(node: PaneNode, path: number[], ratio: number): PaneNode {
@@ -288,6 +298,7 @@ export default function App() {
   const [gitInfos, setGitInfos] = useState<Record<string, GitInfo>>({});
   const [fileBrowserTabId, setFileBrowserTabId] = useState<string | null>(null);
   const [openFiles, setOpenFiles] = useState<Record<string, string>>({});
+  const [forwardedTerminals, setForwardedTerminals] = useState<ForwardedTerminalInfo[]>([]);
   const [search, setSearch] = useState("");
   const [vscodeConfig, setVscodeConfig] = useState<VscodeConfig>({ vscodeUrl: "", vscodePathFrom: "", vscodePathTo: "" });
   const [stats, setStats] = useState<Stats | null>(null);
@@ -370,6 +381,19 @@ export default function App() {
     return () => clearInterval(id);
   }, [auth]);
 
+  useEffect(() => {
+    if (auth !== "ok") return;
+    const poll = async () => {
+      try {
+        const r = await fetch("/api/forwarded-terminals");
+        if (r.ok) setForwardedTerminals(await r.json());
+      } catch {}
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => clearInterval(id);
+  }, [auth]);
+
   async function handleLogout() {
     await fetch("/api/logout", { method: "POST" }).catch(() => {});
     setRoot(null); setStats(null); setAuth("login");
@@ -428,6 +452,23 @@ export default function App() {
   const sendAppctl = useCallback(() => {
     paneRefs.current.get(focusedId)?.send("appctl\r");
   }, [focusedId]);
+
+  const importForwarded = useCallback((fwd: ForwardedTerminalInfo) => {
+    const sessionId = `fwd-${fwd.id}`;
+    if (root) {
+      const existing = collectTerminals(root).find((t) => t.sessionId === sessionId);
+      if (existing) { setFocusedId(existing.id); return; }
+    }
+    const id = newId();
+    const pane: TerminalPane = { kind: "terminal", id, sessionId };
+    const label = `${fwd.workspace?.split("/").filter(Boolean).at(-1) ?? "vscode"}: ${fwd.name}`;
+    setNames((n) => ({ ...n, [id]: label }));
+    setFocusedId(id);
+    setRoot((r) => {
+      if (!r) return pane;
+      return insertPane(r, focusedId, pane);
+    });
+  }, [focusedId, root]);
 
   const handleDividerDrag = useCallback((
     e: React.MouseEvent, path: number[], isV: boolean,
@@ -594,6 +635,35 @@ export default function App() {
                     onBrowse={() => { setFocusedId(t.id); setFileBrowserTabId(t.id); }}
                   />
                 ))}
+
+                {/* VS Code terminals */}
+                {forwardedTerminals.length > 0 && (
+                  <div className="border-t border-zinc-800/60">
+                    <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+                      VS Code
+                    </div>
+                    {forwardedTerminals.map((fwd) => {
+                      const sessionId = `fwd-${fwd.id}`;
+                      const isOpen = root ? collectTerminals(root).some((t) => t.sessionId === sessionId) : false;
+                      const workspaceLabel = fwd.workspace?.split("/").filter(Boolean).at(-1) ?? "vscode";
+                      return (
+                        <div
+                          key={fwd.id}
+                          onClick={() => importForwarded(fwd)}
+                          className={`group flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs transition-colors
+                            ${isOpen ? "text-blue-400 hover:bg-zinc-800/60" : "text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300"}`}
+                        >
+                          <Monitor size={11} className="shrink-0 text-zinc-600" />
+                          <span className="min-w-0 flex-1 truncate">
+                            <span className="text-zinc-600">{workspaceLabel} </span>
+                            {fwd.name}
+                          </span>
+                          {isOpen && <span className="shrink-0 text-[9px] text-blue-500">open</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Bottom stats */}
