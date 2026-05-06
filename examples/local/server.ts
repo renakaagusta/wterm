@@ -619,6 +619,107 @@ function handleGitInfo(req: IncomingMessage, res: ServerResponse) {
   });
 }
 
+// ─── GitHub API proxy ────────────────────────────────────────────────────────
+
+function getGithubRepo(dir: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", dir, "remote", "get-url", "origin"], { timeout: 3000 }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      const m = stdout.trim().match(/github\.com[:/]([^/]+\/[^.]+?)(?:\.git)?$/);
+      resolve(m?.[1] ?? null);
+    });
+  });
+}
+
+async function handleGithub(req: IncomingMessage, res: ServerResponse) {
+  const { query } = parse(req.url || "/", true);
+  const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
+  const session = sessions.get(sessionId);
+  const cwd = session?.cwd;
+
+  if (!cwd) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "session not found or no cwd" }));
+    return;
+  }
+
+  const token = process.env.GH_TOKEN || "";
+  if (!token) {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "GH_TOKEN not configured" }));
+    return;
+  }
+
+  const repo = await getGithubRepo(cwd);
+  if (!repo) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "no GitHub remote" }));
+    return;
+  }
+
+  const ghFetch = (path: string) =>
+    fetch(`https://api.github.com${path}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "wterm",
+      },
+    }).then((r) => (r.ok ? r.json() : Promise.reject(r.status)));
+
+  try {
+    const [rawCommits, rawBranches, rawPulls, rawRuns] = await Promise.all([
+      ghFetch(`/repos/${repo}/commits?per_page=20`),
+      ghFetch(`/repos/${repo}/branches?per_page=30`),
+      ghFetch(`/repos/${repo}/pulls?state=all&per_page=20&sort=updated`),
+      ghFetch(`/repos/${repo}/actions/runs?per_page=20`).then((d: any) => d.workflow_runs).catch(() => []),
+    ]);
+
+    const commits = (rawCommits as any[]).map((c) => ({
+      sha: c.sha.slice(0, 7),
+      message: (c.commit.message as string).split("\n")[0],
+      author: c.commit.author.name,
+      date: c.commit.author.date,
+      url: c.html_url,
+    }));
+
+    const branches = (rawBranches as any[]).map((b) => ({
+      name: b.name,
+      protected: b.protected,
+      sha: b.commit.sha.slice(0, 7),
+    }));
+
+    const pulls = (rawPulls as any[]).map((p) => ({
+      number: p.number,
+      title: p.title,
+      state: p.merged_at ? "merged" : p.state,
+      author: p.user.login,
+      draft: p.draft,
+      createdAt: p.created_at,
+      updatedAt: p.updated_at,
+      url: p.html_url,
+      branch: p.head.ref,
+    }));
+
+    const runs = (rawRuns as any[]).map((r: any) => ({
+      id: r.id,
+      name: r.name,
+      status: r.status,
+      conclusion: r.conclusion,
+      branch: r.head_branch,
+      event: r.event,
+      createdAt: r.created_at,
+      url: r.html_url,
+    }));
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ repo, commits, branches, pulls, runs }));
+  } catch (err) {
+    res.writeHead(502, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: String(err) }));
+  }
+}
+
 // ─── Static file serving (production) ───────────────────────────────────────
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -677,6 +778,7 @@ const server = createServer((req, res) => {
   if (pathname === "/api/file-raw") return handleFileRaw(req, res);
   if (pathname === "/api/git-info") return handleGitInfo(req, res);
   if (pathname === "/api/forwarded-terminals") return handleForwardedTerminals(req, res);
+  if (pathname === "/api/github") return void handleGithub(req, res);
   res.writeHead(404);
   res.end("not found");
 });
