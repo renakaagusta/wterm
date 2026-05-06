@@ -23,6 +23,7 @@ interface PaneTerminalProps {
   showTopbar?: boolean;
   gitInfo?: GitInfo;
   onGithub?: () => void;
+  initialCwd?: string;
 }
 
 // ─── Topbar ──────────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ function PaneTopbar({ sessionId, name, onRename, vscodeUrl, vscodePathFrom, vsco
 // ─── Pane ────────────────────────────────────────────────────────────────────
 
 export const PaneTerminal = forwardRef<PaneHandle, PaneTerminalProps>(
-  function PaneTerminal({ sessionId, focused, onFocus, name, onRename, vscodeUrl, vscodePathFrom, vscodePathTo, showTopbar = true, gitInfo, onGithub }, ref) {
+  function PaneTerminal({ sessionId, focused, onFocus, name, onRename, vscodeUrl, vscodePathFrom, vscodePathTo, showTopbar = true, gitInfo, onGithub, initialCwd }, ref) {
     const [connected, setConnected] = useState(false);
     const { ref: termRef, write } = useTerminal();
     const wsRef = useRef<WebSocket | null>(null);
@@ -152,13 +153,14 @@ export const PaneTerminal = forwardRef<PaneHandle, PaneTerminalProps>(
         const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
         const isLocal = import.meta.env.DEV && window.location.hostname === "localhost";
         const host = isLocal ? "localhost:3001" : window.location.host;
-        const ws = new WebSocket(`${proto}//${host}/api/terminal?sessionId=${sessionId}`);
+        const cwdParam = initialCwd ? `&cwd=${encodeURIComponent(initialCwd)}` : "";
+        const ws = new WebSocket(`${proto}//${host}/api/terminal?sessionId=${sessionId}${cwdParam}`);
         wsRef.current = ws;
         ws.onopen = () => { ws.send(`\x1b[RESIZE:${wt.cols};${wt.rows}]`); setConnected(true); };
         ws.onmessage = (e: MessageEvent) => write(e.data as string);
         ws.onclose = () => { if (wsRef.current === ws) { setConnected(false); wsRef.current = null; } };
       },
-      [sessionId, write],
+      [sessionId, initialCwd, write],
     );
 
     const handleReady = useCallback((wt: WTerm) => { wtRef.current = wt; connect(wt); }, [connect]);

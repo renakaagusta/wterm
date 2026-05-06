@@ -104,7 +104,7 @@ function computeLayouts(
 // ─── Workspace persistence ───────────────────────────────────────────────────
 
 type ViewMode = "split" | "tabs";
-interface Workspace { root: PaneNode; focusedId: string; names?: Record<string, string>; viewMode?: ViewMode }
+interface Workspace { root: PaneNode; focusedId: string; names?: Record<string, string>; viewMode?: ViewMode; sessionCwds?: Record<string, string> }
 
 async function fetchWorkspace(): Promise<Workspace | null> {
   try {
@@ -114,11 +114,11 @@ async function fetchWorkspace(): Promise<Workspace | null> {
   } catch { return null; }
 }
 
-function saveWorkspace(root: PaneNode, focusedId: string, names: Record<string, string>, viewMode: ViewMode) {
+function saveWorkspace(root: PaneNode, focusedId: string, names: Record<string, string>, viewMode: ViewMode, sessionCwds: Record<string, string>) {
   fetch("/api/workspace", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ root, focusedId, names, viewMode }),
+    body: JSON.stringify({ root, focusedId, names, viewMode, sessionCwds }),
   }).catch(() => {});
 }
 
@@ -312,6 +312,7 @@ export default function App() {
   const [fileBrowserTabId, setFileBrowserTabId] = useState<string | null>(null);
   const [openFiles, setOpenFiles] = useState<Record<string, string>>({});
   const [githubSessionId, setGithubSessionId] = useState<string | null>(null);
+  const [sessionCwds, setSessionCwds] = useState<Record<string, string>>({});
   const [forwardedTerminals, setForwardedTerminals] = useState<ForwardedTerminalInfo[]>([]);
   const [search, setSearch] = useState("");
   const [vscodeConfig, setVscodeConfig] = useState<VscodeConfig>({ vscodeUrl: "", vscodePathFrom: "", vscodePathTo: "" });
@@ -335,6 +336,7 @@ export default function App() {
         setRoot(ws.root);
         setFocusedId(ws.focusedId ?? collectIds(ws.root)[0]);
         if (ws.viewMode) setViewMode(ws.viewMode);
+        if (ws.sessionCwds) setSessionCwds(ws.sessionCwds);
         const saved = ws.names ?? {};
         const allIds = collectIds(ws.root);
         const filled: Record<string, string> = {};
@@ -352,8 +354,14 @@ export default function App() {
   useEffect(() => {
     if (!root || !focusedId) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveWorkspace(root, focusedId, names, viewMode), 400);
-  }, [root, focusedId, names, viewMode]);
+    // Build sessionId → cwd map from pane-level cwds
+    const terminalPanes = collectTerminals(root);
+    const scwds: Record<string, string> = {};
+    for (const { id, sessionId } of terminalPanes) {
+      if (cwds[id]) scwds[sessionId] = cwds[id];
+    }
+    saveTimer.current = setTimeout(() => saveWorkspace(root, focusedId, names, viewMode, scwds), 400);
+  }, [root, focusedId, names, viewMode, cwds]);
 
   // Poll CWDs + git info for sidebar / topbar display
   useEffect(() => {
@@ -551,6 +559,7 @@ export default function App() {
           showTopbar={viewMode === "split"}
           gitInfo={gitInfos[id]}
           onGithub={() => setGithubSessionId(sessionId)}
+          initialCwd={sessionCwds[sessionId]}
         />
         {openFile && (
           <div className="absolute inset-0 z-10">

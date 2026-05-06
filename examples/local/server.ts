@@ -240,7 +240,7 @@ function resolveUid(username: string): { uid: number; gid: number; home: string 
   return null;
 }
 
-function createSession(id: string): Session {
+function createSession(id: string, initialCwd?: string): Session {
   const shellUser = process.env.SHELL_USER;
   const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
@@ -252,6 +252,8 @@ function createSession(id: string): Session {
     const resolved = resolveUid(shellUser);
     if (resolved) { uid = resolved.uid; gid = resolved.gid; home = resolved.home; }
   }
+
+  const startCwd = (initialCwd && existsSync(initialCwd)) ? initialCwd : home;
 
   const shell = process.env.SHELL || (process.platform === "win32" ? "cmd.exe" : "/bin/bash");
   const osc7Cmd = `printf '\\033]7;file://%s%s\\007' "$(hostname)" "$(pwd)"`;
@@ -272,7 +274,7 @@ function createSession(id: string): Session {
     name: "xterm-256color",
     cols: 80,
     rows: 24,
-    cwd: home,
+    cwd: startCwd,
     env,
     ...(uid !== undefined ? { uid, gid } : {}),
   });
@@ -824,10 +826,11 @@ server.on("upgrade", (req, socket, head) => {
     }
 
     // Normal PTY session
+    const initialCwd = typeof query.cwd === "string" ? query.cwd : undefined;
     let session = sessions.get(sessionId);
     if (!session) {
       try {
-        session = createSession(sessionId);
+        session = createSession(sessionId, initialCwd);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (ws.readyState === WebSocket.OPEN) {
