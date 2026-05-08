@@ -340,7 +340,11 @@ function createSession(id: string, initialCwd?: string): Session {
     ...baseEnv,
     HOME: home,
     USER: shellUser || baseEnv.USER || "",
-    PROMPT_COMMAND: existingPrompt ? `${osc7Cmd}; ${existingPrompt}` : osc7Cmd,
+    // Prepend /usr/local/bin once per session so the Linux-native claude (and other
+    // container-installed tools) win over macOS binaries on the bind-mounted home.
+    // PROMPT_COMMAND fires after ALL login startup scripts (.bash_profile / .bashrc),
+    // which is the only reliable place to override the PATH they prepend to.
+    PROMPT_COMMAND: `[ -z "$_wtp" ] && { export PATH="/usr/local/bin:$PATH"; export _wtp=1; }; ${existingPrompt ? `${osc7Cmd}; ${existingPrompt}` : osc7Cmd}`,
     // UTF-8 locale so blessed/ncurses uses Unicode box-drawing instead of ACS q-characters
     LANG: "C.UTF-8",
     LC_ALL: "C.UTF-8",
