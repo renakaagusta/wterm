@@ -625,6 +625,10 @@ function getTmuxCwd(sessionId: string): Promise<string | null> {
 }
 
 async function resolveSessionCwd(session: Session): Promise<string | null> {
+  // Scrollback reflects the latest bash prompt (user@host:PATH$) — most accurate.
+  const scrollbackCwd = cwdFromScrollback(session.scrollback, resolveShellUserHome());
+  if (scrollbackCwd) { session.cwd = scrollbackCwd; return scrollbackCwd; }
+  // Fall back to tmux's own pane path tracking.
   const tmuxCwd = await getTmuxCwd(session.id);
   if (tmuxCwd) { session.cwd = tmuxCwd; return tmuxCwd; }
   return session.cwd ?? null;
