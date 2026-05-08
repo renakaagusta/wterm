@@ -612,16 +612,33 @@ function deepestLeaf(pid: number, depth = 0): number {
   return deepestLeaf(children[children.length - 1], depth + 1);
 }
 
-function handleCwd(req: IncomingMessage, res: ServerResponse) {
+// Tmux intercepts bare OSC 7 sequences for its own path tracking so they never
+// reach session.onData. Query tmux directly for the pane's live CWD and keep
+// session.cwd in sync as a cache.
+function getTmuxCwd(sessionId: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("tmux", ["display-message", "-p", "-t", sessionId, "#{pane_current_path}"],
+      { timeout: 2000 },
+      (err, stdout) => resolve(err ? null : (stdout.trim() || null))
+    );
+  });
+}
+
+async function resolveSessionCwd(session: Session): Promise<string | null> {
+  const tmuxCwd = await getTmuxCwd(session.id);
+  if (tmuxCwd) { session.cwd = tmuxCwd; return tmuxCwd; }
+  return session.cwd ?? null;
+}
+
+async function handleCwd(req: IncomingMessage, res: ServerResponse) {
   const { query } = parse(req.url || "/", true);
   const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
   const session = sessions.get(sessionId);
   if (!session) { res.writeHead(404); res.end("session not found"); return; }
 
-  const cwd = session.cwd;
-  if (!cwd) { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ cwd: "/" })); return; }
+  const cwd = await resolveSessionCwd(session);
   res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ cwd }));
+  res.end(JSON.stringify({ cwd: cwd ?? "/" }));
 }
 
 // ─── Directory listing ───────────────────────────────────────────────────────
@@ -713,13 +730,13 @@ function handleFileRaw(req: IncomingMessage, res: ServerResponse) {
 
 // ─── Git info for a session's cwd ───────────────────────────────────────────
 
-function handleGitInfo(req: IncomingMessage, res: ServerResponse) {
+async function handleGitInfo(req: IncomingMessage, res: ServerResponse) {
   const { query } = parse(req.url || "/", true);
   const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
   const session = sessions.get(sessionId);
   const empty = { branch: null as string | null, added: 0, removed: 0 };
 
-  const cwd = session?.cwd;
+  const cwd = session ? await resolveSessionCwd(session) : null;
   if (!cwd) {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(empty));
@@ -761,7 +778,7 @@ async function handleGithub(req: IncomingMessage, res: ServerResponse) {
   const { query } = parse(req.url || "/", true);
   const sessionId = typeof query.sessionId === "string" ? query.sessionId : "";
   const session = sessions.get(sessionId);
-  const cwd = session?.cwd;
+  const cwd = session ? await resolveSessionCwd(session) : null;
 
   if (!cwd) {
     res.writeHead(404, { "Content-Type": "application/json" });
