@@ -1,0 +1,47 @@
+services:
+  wterm:
+    build:
+      context: ../
+      dockerfile: app/Dockerfile
+    container_name: wterm
+    restart: unless-stopped
+    volumes:
+      - wterm-data:/data
+      - /Users/renakaagusta:/Users/renakaagusta
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /Users/renakaagusta/Documents/project/appctl:/opt/appctl:ro
+      - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
+    ports:
+      - "127.0.0.1:3021:3001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - HOST=0.0.0.0
+      - WORKSPACE_FILE=/data/workspace.json
+      - SHELL=/bin/bash
+      - WTERM_PASSWORD=${WTERM_PASSWORD}
+      - TOKEN_SECRET=${TOKEN_SECRET}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock
+      - GH_TOKEN=${GH_TOKEN}
+      - VSCODE_URL=https://code.renakaagusta.dev
+      - VSCODE_PATH_MAP=/Users/renakaagusta/Documents/project:/home/project
+      - BRIDGE_SECRET=${BRIDGE_SECRET}
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: wterm-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared-docker.yml:/etc/cloudflared/config.yml:ro
+      - ${CLOUDFLARED_CREDENTIALS}:/etc/cloudflared/credentials.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - wterm
+
+volumes:
+  wterm-data:
