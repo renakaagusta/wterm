@@ -6,14 +6,14 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /build
 
 # Copy manifests for layer caching
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json .npmrc ./
 COPY packages/@internal/ts/package.json  ./packages/@internal/ts/
 COPY packages/@wterm/core/package.json   ./packages/@wterm/core/
 COPY packages/@wterm/dom/package.json    ./packages/@wterm/dom/
 COPY packages/@wterm/react/package.json  ./packages/@wterm/react/
 COPY app/package.json                    ./app/
 
-RUN pnpm install --frozen-lockfile
+RUN pnpm install
 
 # Copy source
 COPY packages/@internal/ts/ ./packages/@internal/ts/
@@ -22,13 +22,16 @@ COPY packages/@wterm/dom/   ./packages/@wterm/dom/
 COPY packages/@wterm/react/ ./packages/@wterm/react/
 COPY app/                   ./app/
 
-# Copy wasm and build Vite frontend
+# Copy wasm into app/public so vite bundles it into dist
 RUN mkdir -p app/public && \
-    cp app/node_modules/@wterm/core/wasm/wterm.wasm app/public/wterm.wasm
-RUN cd app && node_modules/.bin/vite build
+    cp packages/@wterm/core/wasm/wterm.wasm app/public/wterm.wasm
+
+# Build all workspace packages in dependency order (turbo handles sequencing),
+# then build the app (vite). app/public/wterm.wasm must exist before vite runs.
+RUN pnpm run build
 
 # Bundle server.ts into a single server.mjs (all npm deps stay external)
-RUN cd app && node_modules/.bin/esbuild server.ts \
+RUN cd app && pnpm exec esbuild server.ts \
     --platform=node \
     --format=esm \
     --bundle \
