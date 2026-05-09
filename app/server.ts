@@ -1,4 +1,5 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
+import { createConnection } from "net";
 import { parse } from "url";
 import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import { exec, execFile, spawnSync } from "child_process";
@@ -472,59 +473,79 @@ let cachedStats = {
   disk: { used: 0, total: 0 },
 };
 
-function updateCpu() {
-  const cmd = process.platform === "darwin"
-    ? "top -l 1 -s 0 | grep 'CPU usage'"
-    : "top -bn1 | grep '%Cpu'";
-  exec(cmd, { timeout: 3000 }, (err, out) => {
+// Run a command on the macOS host via the appctl daemon socket.
+// The entrypoint bridges /tmp/appctl.sock → host:7654 → host appctl daemon,
+// so we send the same JSON protocol as appctl's socket.mjs directly — bypassing
+// the appctl CLI which incorrectly tries TCP port 9225 when inside Docker.
+function execHost(cmd: string, timeoutMs = 8000): Promise<string | null> {
+  return new Promise((resolve) => {
+    const client = createConnection("/tmp/appctl.sock");
+    let data = "";
+    const payload = JSON.stringify({ target: "host", command: "exec", args: { cmd, timeout: timeoutMs } }) + "\n";
+    const timer = setTimeout(() => { client.destroy(); resolve(null); }, timeoutMs + 2000);
+    client.once("connect", () => client.write(payload));
+    client.on("data", (chunk) => (data += chunk));
+    client.on("end", () => {
+      clearTimeout(timer);
+      try { const res = JSON.parse(data); resolve(res.ok ? (res.stdout ?? "") : null); }
+      catch { resolve(null); }
+    });
+    client.on("error", () => { clearTimeout(timer); resolve(null); });
+  });
+}
+
+async function updateCpu() {
+  const out = await execHost("top -l 1 -s 0");
+  if (out) {
+    const m = out.match(/([\d.]+)% user,\s*([\d.]+)% sys/);
+    if (m) { cachedStats.cpu = Math.round(parseFloat(m[1]) + parseFloat(m[2])); setTimeout(updateCpu, 4000); return; }
+  }
+  // Fallback: container load average
+  exec("top -bn1 | grep '%Cpu'", { timeout: 3000 }, (err, out2) => {
     if (!err) {
-      if (process.platform === "darwin") {
-        const m = out.match(/([\d.]+)% user,\s*([\d.]+)% sys/);
-        if (m) cachedStats.cpu = Math.round(parseFloat(m[1]) + parseFloat(m[2]));
-      } else {
-        const m = out.match(/([\d.]+)\s+us.*?([\d.]+)\s+sy/);
-        if (m) cachedStats.cpu = Math.round(parseFloat(m[1]) + parseFloat(m[2]));
-      }
+      const m = out2.match(/([\d.]+)\s+us.*?([\d.]+)\s+sy/);
+      if (m) cachedStats.cpu = Math.round(parseFloat(m[1]) + parseFloat(m[2]));
     } else {
-      const load = os.loadavg()[0];
-      cachedStats.cpu = Math.min(100, Math.round((load / os.cpus().length) * 100));
+      cachedStats.cpu = Math.min(100, Math.round((os.loadavg()[0] / os.cpus().length) * 100));
     }
     setTimeout(updateCpu, 4000);
   });
 }
 
-function updateRam() {
-  const total = os.totalmem();
-  if (process.platform === "darwin") {
-    exec("vm_stat", { timeout: 2000 }, (err, out) => {
-      if (!err) {
-        const pageSize = parseInt(out.match(/page size of (\d+)/)?.[1] ?? "16384");
-        const get = (k: string) => parseInt(out.match(new RegExp(`${k}:\\s+(\\d+)`))?.[1] ?? "0");
-        const free = (get("Pages free") + get("Pages inactive") + get("Pages speculative")) * pageSize;
-        cachedStats.ram = { used: total - free, total };
-      } else {
-        cachedStats.ram = { used: total - os.freemem(), total };
-      }
-      setTimeout(updateRam, 4000);
-    });
-  } else {
-    exec("free -b", { timeout: 2000 }, (err, out) => {
-      if (!err) {
-        const m = out.match(/Mem:\s+(\d+)\s+(\d+)/);
-        if (m) cachedStats.ram = { total: parseInt(m[1]), used: parseInt(m[2]) };
-        else cachedStats.ram = { used: total - os.freemem(), total };
-      } else {
-        cachedStats.ram = { used: total - os.freemem(), total };
-      }
-      setTimeout(updateRam, 4000);
-    });
+async function updateRam() {
+  const [memsizeOut, vmstatOut] = await Promise.all([
+    execHost("sysctl hw.memsize"),
+    execHost("vm_stat"),
+  ]);
+  if (memsizeOut && vmstatOut) {
+    const total = parseInt(memsizeOut.match(/hw\.memsize:\s*(\d+)/)?.[1] ?? "0");
+    const pageSize = parseInt(vmstatOut.match(/page size of (\d+)/)?.[1] ?? "16384");
+    const get = (k: string) => parseInt(vmstatOut.match(new RegExp(`${k}:\\s+(\\d+)`))?.[1] ?? "0");
+    const free = (get("Pages free") + get("Pages inactive") + get("Pages speculative")) * pageSize;
+    if (total > 0) { cachedStats.ram = { used: total - free, total }; setTimeout(updateRam, 4000); return; }
   }
+  // Fallback: container RAM via free
+  exec("free -b", { timeout: 2000 }, (err, out) => {
+    if (!err) {
+      const m = out.match(/Mem:\s+(\d+)\s+(\d+)/);
+      if (m) cachedStats.ram = { total: parseInt(m[1]), used: parseInt(m[2]) };
+    }
+    setTimeout(updateRam, 4000);
+  });
 }
 
-function updateDisk() {
-  exec("df -k /", { timeout: 2000 }, (err, out) => {
+async function updateDisk() {
+  const out = await execHost("df -k /");
+  if (out) {
+    const parts = out.trim().split("\n").at(-1)!.trim().split(/\s+/);
+    const total = parseInt(parts[1]) * 1024;
+    const used = parseInt(parts[2]) * 1024;
+    if (total > 0) { cachedStats.disk = { total, used }; setTimeout(updateDisk, 10_000); return; }
+  }
+  // Fallback: container disk
+  exec("df -k /", { timeout: 2000 }, (err, out2) => {
     if (!err) {
-      const parts = out.trim().split("\n").at(-1)!.trim().split(/\s+/);
+      const parts = out2.trim().split("\n").at(-1)!.trim().split(/\s+/);
       cachedStats.disk = { total: parseInt(parts[1]) * 1024, used: parseInt(parts[2]) * 1024 };
     }
     setTimeout(updateDisk, 10_000);
