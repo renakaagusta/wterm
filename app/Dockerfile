@@ -72,12 +72,16 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     WORKSPACE_FILE=/data/workspace.json \
     SHELL_USER=renakaagusta \
+    PATH="/opt/appctl/node_modules/.bin:/opt/appctl:${PATH}" \
     AGENT_BROWSER_SCREENSHOT_DIR=/Users/renakaagusta/.cache/agent-browser
 
 # Create non-root shell user with home dir pointing to the bind-mounted host home
 RUN useradd -u 1000 -g 1000 -s /bin/bash -d /Users/renakaagusta -M renakaagusta 2>/dev/null || \
     useradd -s /bin/bash -d /Users/renakaagusta -M renakaagusta 2>/dev/null || true
 
+
+# appctl symlink (actual dir is bind-mounted at runtime)
+RUN ln -s /opt/appctl/cli.mjs /usr/local/bin/appctl || true
 
 EXPOSE 3001
 

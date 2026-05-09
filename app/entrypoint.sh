@@ -2,6 +2,15 @@
 # Fix docker socket permissions so non-root shell user can run docker commands
 chmod 666 /var/run/docker.sock 2>/dev/null || true
 
+# Bridge host appctl daemon socket (exposed via TCP on host) into container as a Unix socket.
+# The host must be running: socat TCP-LISTEN:7654,reuseaddr,fork UNIX-CONNECT:/tmp/appctl.sock
+rm -f /tmp/appctl.sock
+socat UNIX-LISTEN:/tmp/appctl.sock,reuseaddr,fork \
+  TCP:host.docker.internal:7654 &
+# Wait for socket to appear then make it world-accessible
+until [ -S /tmp/appctl.sock ]; do sleep 0.1; done
+chmod 777 /tmp/appctl.sock
+
 # Forward Chrome CDP ports (9222-9299) from container localhost → macOS host.
 # This lets `agent-browser --cdp PORT` reach the Chrome instance running on the Mac.
 for port in $(seq 9222 9299); do
