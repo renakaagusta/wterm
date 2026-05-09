@@ -32,6 +32,10 @@ yarn-error.log*
 # env files
 .env*
 
+# personal compose files (canonical templates live in /deploy)
+docker-compose.yml
+cloudflared-docker.yml
+
 # wasm build artifact
 /public/wterm.wasm
 

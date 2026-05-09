@@ -1,0 +1,55 @@
+# wterm — server deployment behind Traefik
+#
+# Assumes Traefik is already running on the host with an external Docker
+# network (default name: `traefik`) and a configured certificate resolver.
+# Adjust the `traefik.*` labels below to match your setup.
+#
+# Copy `.env.example` to `.env` and fill in the blanks before `docker compose up`.
+
+services:
+  wterm:
+    build:
+      context: ../..
+      dockerfile: app/Dockerfile
+      args:
+        SHELL_USER: ${SHELL_USER:-wterm}
+        SHELL_UID: ${SHELL_UID:-1000}
+        SHELL_GID: ${SHELL_GID:-1000}
+        SHELL_HOME: ${SHELL_HOME:-/home/wterm}
+    image: wterm:traefik
+    container_name: wterm
+    restart: unless-stopped
+    volumes:
+      - wterm-data:/data
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      HOST: 0.0.0.0
+      WORKSPACE_FILE: /data/workspace.json
+      SHELL: /bin/bash
+      SHELL_USER: ${SHELL_USER:-wterm}
+      WTERM_PASSWORD: ${WTERM_PASSWORD}
+      TOKEN_SECRET: ${TOKEN_SECRET}
+      BRIDGE_SECRET: ${BRIDGE_SECRET:-}
+      GH_TOKEN: ${GH_TOKEN:-}
+      VSCODE_URL: ${VSCODE_URL:-}
+      VSCODE_PATH_MAP: ${VSCODE_PATH_MAP:-}
+    networks:
+      - traefik
+      - default
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
+      traefik.http.routers.wterm.rule: Host(`${WTERM_HOST}`)
+      traefik.http.routers.wterm.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.wterm.tls: "true"
+      traefik.http.routers.wterm.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.services.wterm.loadbalancer.server.port: "3001"
+
+volumes:
+  wterm-data:
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}

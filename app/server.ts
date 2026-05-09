@@ -545,8 +545,8 @@ function handlePutWorkspace(req: IncomingMessage, res: ServerResponse) {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
-const VSCODE_URL = process.env.VSCODE_URL || "https://code.renakaagusta.dev";
-// Optional path prefix rewrite: "from:to" e.g. "/Users/renakaagusta/Documents/project:/home/project"
+const VSCODE_URL = process.env.VSCODE_URL || "";
+// Optional path prefix rewrite: "from:to" e.g. "/host/path:/container/path"
 const VSCODE_PATH_MAP = process.env.VSCODE_PATH_MAP || "";
 
 function handleConfig(_req: IncomingMessage, res: ServerResponse) {
@@ -772,8 +772,9 @@ async function handleGithub(req: IncomingMessage, res: ServerResponse) {
 
   const repo = await getGithubRepo(cwd);
   if (!repo) {
+    const short = cwd.replace(/^\/Users\/[^/]+/, "~");
     res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "no GitHub remote" }));
+    res.end(JSON.stringify({ error: `no GitHub remote in ${short}` }));
     return;
   }
 

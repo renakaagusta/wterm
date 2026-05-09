@@ -67,17 +67,29 @@ COPY --from=builder /build/app/server.mjs ./
 COPY app/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
+# Shell user identity is set at build time so the same Dockerfile works for
+# laptop deploys (where SHELL_USER must match the host user) and server deploys
+# (where any non-root user will do). Override via --build-arg.
+ARG SHELL_USER=wterm
+ARG SHELL_UID=1000
+ARG SHELL_GID=1000
+ARG SHELL_HOME=/home/wterm
+
 ENV NODE_ENV=production \
     PORT=3001 \
     HOST=0.0.0.0 \
     WORKSPACE_FILE=/data/workspace.json \
-    SHELL_USER=renakaagusta \
+    SHELL_USER=${SHELL_USER} \
     PATH="/opt/appctl/node_modules/.bin:/opt/appctl:${PATH}" \
-    AGENT_BROWSER_SCREENSHOT_DIR=/Users/renakaagusta/.cache/agent-browser
+    AGENT_BROWSER_SCREENSHOT_DIR=${SHELL_HOME}/.cache/agent-browser
 
-# Create non-root shell user with home dir pointing to the bind-mounted host home
-RUN useradd -u 1000 -g 1000 -s /bin/bash -d /Users/renakaagusta -M renakaagusta 2>/dev/null || \
-    useradd -s /bin/bash -d /Users/renakaagusta -M renakaagusta 2>/dev/null || true
+# Create non-root shell user. -M means no home dir is created — at runtime the
+# host home is bind-mounted at SHELL_HOME (laptop) or a docker volume can be
+# mounted there (server). Falls back to picking any free UID/GID if the
+# requested ones are taken.
+RUN groupadd -g ${SHELL_GID} ${SHELL_USER} 2>/dev/null || groupadd ${SHELL_USER} 2>/dev/null || true && \
+    useradd -u ${SHELL_UID} -g ${SHELL_GID} -s /bin/bash -d ${SHELL_HOME} -M ${SHELL_USER} 2>/dev/null || \
+    useradd -s /bin/bash -d ${SHELL_HOME} -M ${SHELL_USER} 2>/dev/null || true
 
 
 # appctl symlink (actual dir is bind-mounted at runtime)

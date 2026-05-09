@@ -1,0 +1,65 @@
+# wterm — laptop deployment via Cloudflare Tunnel
+#
+# Designed for a personal macOS workstation that exposes a wterm container to
+# the internet through `cloudflared`. The container bind-mounts the host home
+# directory and the appctl daemon socket so agents inside the terminal can
+# drive macOS-native tools (Chrome, Android emulator, etc).
+#
+# Copy `.env.example` to `.env` and fill in the blanks before `docker compose up`.
+
+services:
+  wterm:
+    build:
+      context: ../..
+      dockerfile: app/Dockerfile
+      args:
+        SHELL_USER: ${SHELL_USER}
+        SHELL_UID: ${SHELL_UID:-1000}
+        SHELL_GID: ${SHELL_GID:-1000}
+        SHELL_HOME: ${HOST_HOME}
+    image: wterm:cloudflared
+    container_name: wterm
+    restart: unless-stopped
+    volumes:
+      - wterm-data:/data
+      - ${HOST_HOME}:${HOST_HOME}
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPCTL_HOST_PATH}:/opt/appctl:ro
+      - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
+    ports:
+      - "127.0.0.1:${WTERM_HOST_PORT:-3021}:3001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      HOST: 0.0.0.0
+      WORKSPACE_FILE: /data/workspace.json
+      SHELL: /bin/bash
+      SHELL_USER: ${SHELL_USER}
+      WTERM_PASSWORD: ${WTERM_PASSWORD}
+      TOKEN_SECRET: ${TOKEN_SECRET}
+      BRIDGE_SECRET: ${BRIDGE_SECRET:-}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
+      GH_TOKEN: ${GH_TOKEN:-}
+      VSCODE_URL: ${VSCODE_URL:-}
+      VSCODE_PATH_MAP: ${VSCODE_PATH_MAP:-}
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: wterm-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ${CLOUDFLARED_CONFIG}:/etc/cloudflared/config.yml:ro
+      - ${CLOUDFLARED_CREDENTIALS}:/etc/cloudflared/credentials.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+    depends_on:
+      - wterm
+
+volumes:
+  wterm-data:

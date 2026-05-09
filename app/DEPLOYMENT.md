@@ -1,13 +1,13 @@
-# Deployment Guide
+# Laptop Deployment Guide
 
-This guide covers deploying wterm on a new macOS machine. The setup runs two Docker containers (wterm + Cloudflare tunnel) and relies on several macOS-side services.
+Step-by-step setup for running wterm on a personal macOS workstation, exposed to the internet via Cloudflare Tunnel. Server deployments behind Traefik are simpler — see [`../deploy/traefik/`](../deploy/traefik/).
 
 ---
 
 ## Architecture Overview
 
 ```
-Browser → terminal.renakaagusta.dev
+Browser → terminal.example.com
              ↓
        cloudflared (Docker)
              ↓
@@ -20,7 +20,7 @@ Browser → terminal.renakaagusta.dev
          └── Android SDK (emulator, sdkmanager, adb, etc.)
 ```
 
-The Docker container forwards several ports back to the macOS host via `socat` so agents inside the terminal can use macOS-native tools (Chrome, Android emulator, appctl) transparently.
+The container forwards several ports back to the macOS host via `socat` so agents inside the terminal can use macOS-native tools (Chrome, Android emulator, appctl) transparently.
 
 ---
 
@@ -29,15 +29,15 @@ The Docker container forwards several ports back to the macOS host via `socat` s
 Install these on the macOS host before deploying:
 
 - **Docker Desktop** — containers must be able to resolve `host.docker.internal`
-- **Node.js 20+** — for the appctl daemon (`node /path/to/appctl/daemon.mjs`)
+- **Node.js 20+** — for the appctl daemon
 - **socat** — bridges the appctl Unix socket over TCP (`brew install socat`)
-- **Cloudflare account** — with a tunnel configured for `terminal.renakaagusta.dev`
-- **Android Studio / SDK** — if Android tooling is needed (`~/Library/Android/sdk`)
-- **Google Chrome** — if browser automation via `agent-browser` is needed
+- **Cloudflare account** — with a tunnel created via `cloudflared tunnel create`
+- **Android Studio / SDK** — optional, only if Android tooling is needed
+- **Google Chrome** — optional, only if browser automation is needed
 
 ---
 
-## Step 1 — Clone the repo
+## Step 1 — Clone the repos
 
 ```bash
 git clone <wterm-repo-url> ~/Documents/project/wterm
@@ -48,95 +48,44 @@ The `appctl` directory is bind-mounted read-only into the container at `/opt/app
 
 ---
 
-## Step 2 — Create the `.env` file
+## Step 2 — Create the Cloudflare tunnel config
 
-Create `examples/local/.env` (never commit this):
+```bash
+cd ~/Documents/project/wterm/deploy/cloudflared
+cp cloudflared-config.example.yml cloudflared-config.yml
+```
+
+Edit `cloudflared-config.yml` and replace `REPLACE_WITH_TUNNEL_ID` and the example hostnames with your own. The credentials JSON path is set in `.env` (next step) — the file inside the container always lives at `/etc/cloudflared/credentials.json`.
+
+---
+
+## Step 3 — Create `.env`
+
+```bash
+cp .env.example .env
+```
+
+Fill in at minimum:
 
 ```env
-# Password required to log in to the terminal UI
-WTERM_PASSWORD=your-strong-password-here
-
-# Secret used to sign session tokens (any long random string)
-TOKEN_SECRET=your-random-secret-here
-
-# Absolute path to your Cloudflare tunnel credentials JSON
-CLOUDFLARED_CREDENTIALS=/Users/YOUR_USER/.cloudflared/your-tunnel-id.json
+SHELL_USER=youruser                                   # your macOS username
+HOST_HOME=/Users/youruser                             # absolute path
+APPCTL_HOST_PATH=/Users/youruser/Documents/project/appctl
+WTERM_PASSWORD=<openssl rand -hex 16>
+TOKEN_SECRET=<openssl rand -hex 32>
+CLOUDFLARED_CONFIG=/Users/youruser/Documents/project/wterm/deploy/cloudflared/cloudflared-config.yml
+CLOUDFLARED_CREDENTIALS=/Users/youruser/.cloudflared/<tunnel-id>.json
 ```
 
-Generate a strong secret:
-```bash
-openssl rand -hex 32
-```
+See `.env.example` for the optional variables (VS Code URL, GH token, host port, etc).
 
 ---
 
-## Step 3 — Configure the Cloudflare tunnel
-
-Edit `examples/local/cloudflared-docker.yml`:
-
-```yaml
-tunnel: <your-tunnel-id>
-credentials-file: /etc/cloudflared/credentials.json
-
-ingress:
-  - hostname: terminal.renakaagusta.dev
-    service: http://wterm:3001
-
-  - service: http_status:404
-```
-
-The tunnel ID and credentials file come from `cloudflared tunnel create <name>`.  
-Make sure `CLOUDFLARED_CREDENTIALS` in `.env` points to the downloaded credentials JSON.
-
----
-
-## Step 4 — Adapt `docker-compose.yml` for the new machine
-
-Open `examples/local/docker-compose.yml` and update the bind-mount paths to match the new user's home directory:
-
-```yaml
-volumes:
-  - wterm-data:/data
-  - /Users/YOUR_USER:/Users/YOUR_USER          # ← update username
-  - /var/run/docker.sock:/var/run/docker.sock
-  - /Users/YOUR_USER/Documents/project/appctl:/opt/appctl:ro  # ← update path
-```
-
-Also update these environment variables in the same file:
-
-```yaml
-environment:
-  - SHELL_USER=YOUR_USER    # the non-root user the shell runs as
-```
-
----
-
-## Step 5 — Adapt the Dockerfile for the new user
-
-In `examples/local/Dockerfile`, update the username in two places:
-
-```dockerfile
-# Shell user account (must match SHELL_USER env)
-RUN useradd -u 1000 -g 1000 -s /bin/bash -d /Users/YOUR_USER -M YOUR_USER ...
-
-# Screenshot directory (on bind-mounted home)
-ENV AGENT_BROWSER_SCREENSHOT_DIR=/Users/YOUR_USER/.cache/agent-browser
-```
-
-Also update the `PATH` inside `ENV` if the appctl path changes:
-
-```dockerfile
-ENV PATH="/opt/appctl/node_modules/.bin:/opt/appctl:${PATH}"
-```
-
----
-
-## Step 6 — Start the appctl daemon on the macOS host
+## Step 4 — Start the appctl daemon on the macOS host
 
 The daemon must run on the host so the container can reach it.
 
 ```bash
-# Start the daemon (auto-restarts are not set up — use launchd or a keep-alive loop)
 node ~/Documents/project/appctl/daemon.mjs &
 ```
 
@@ -161,7 +110,7 @@ To make both survive reboots, add them to `~/Library/LaunchAgents/`. Example pli
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/node</string>
-    <string>/Users/YOUR_USER/Documents/project/appctl/daemon.mjs</string>
+    <string>/Users/youruser/Documents/project/appctl/daemon.mjs</string>
   </array>
   <key>RunAtLoad</key>         <true/>
   <key>KeepAlive</key>         <true/>
@@ -178,36 +127,35 @@ launchctl load ~/Library/LaunchAgents/dev.appctl.daemon.plist
 
 ---
 
-## Step 7 — Build and start the containers
+## Step 5 — Build and start the containers
 
 ```bash
-cd ~/Documents/project/wterm/examples/local
-docker-compose build
-docker-compose up -d
+cd ~/Documents/project/wterm/deploy/cloudflared
+docker compose up -d --build
 ```
 
 Check logs:
 ```bash
-docker-compose logs -f wterm
-docker-compose logs -f cloudflared
+docker compose logs -f wterm
+docker compose logs -f cloudflared
 ```
 
 ---
 
-## Step 8 — Verify services inside the container
+## Step 6 — Verify services inside the container
 
 ```bash
 # appctl socket bridge
 docker exec wterm ls -la /tmp/appctl.sock
 
 # adb reaches macOS ADB server
-docker exec -u renakaagusta wterm adb devices
+docker exec -u "$SHELL_USER" wterm adb devices
 
 # agent-browser is available
 docker exec wterm agent-browser --version
 
 # Android emulator list (proxied via appctl host-exec)
-docker exec -u renakaagusta wterm emulator -list-avds
+docker exec -u "$SHELL_USER" wterm emulator -list-avds
 ```
 
 ---
@@ -217,6 +165,7 @@ docker exec -u renakaagusta wterm emulator -list-avds
 | Port | Where | Purpose |
 |------|-------|---------|
 | 3001 | Docker container | wterm HTTP/WebSocket server |
+| 3021 | macOS loopback | Default host port the UI binds to (override via `WTERM_HOST_PORT`) |
 | 5037 | macOS → container (socat) | ADB server (Linux adb client) |
 | 7654 | macOS TCP | appctl Unix socket TCP bridge |
 | 9223–9230 | macOS → container (socat) | Chrome CDP ports (agent-browser) |
@@ -226,23 +175,30 @@ docker exec -u renakaagusta wterm emulator -list-avds
 
 ## Environment variables reference
 
+See [`../deploy/cloudflared/.env.example`](../deploy/cloudflared/.env.example) for the authoritative list with descriptions.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `WTERM_PASSWORD` | Yes | Login password for the terminal UI |
-| `TOKEN_SECRET` | Yes | Secret for signing auth tokens |
-| `CLOUDFLARED_CREDENTIALS` | Yes | Path to Cloudflare tunnel credentials JSON |
-| `SHELL_USER` | Yes | macOS username the shell session runs as |
-| `AGENT_BROWSER_SCREENSHOT_DIR` | No | Where screenshots are saved (default: `/tmp`) |
-| `DOCKER_HOST` | No | Docker socket path inside container |
+| `SHELL_USER` | Yes | Username for the in-container shell (should match host user). |
+| `HOST_HOME` | Yes | Absolute path of the host home directory to bind-mount. |
+| `APPCTL_HOST_PATH` | Yes | Absolute path to your local appctl checkout. |
+| `WTERM_PASSWORD` | Yes | Login password for the terminal UI. |
+| `TOKEN_SECRET` | Yes | Secret for signing auth tokens. |
+| `CLOUDFLARED_CONFIG` | Yes | Path to the tunnel ingress YAML. |
+| `CLOUDFLARED_CREDENTIALS` | Yes | Path to the tunnel credentials JSON. |
+| `WTERM_HOST_PORT` | No | Loopback port the UI binds to. Default `3021`. |
+| `BRIDGE_SECRET` | No | Shared secret for the appctl HTTP bridge. |
+| `GH_TOKEN` | No | GitHub token for the in-terminal `gh` CLI. |
+| `VSCODE_URL` | No | Public URL of an openvscode-server, shown in the UI. |
+| `VSCODE_PATH_MAP` | No | `host_path:container_path` rewrite for VS Code "open" links. |
 
 ---
 
 ## Rebuilding after code changes
 
 ```bash
-cd ~/Documents/project/wterm/examples/local
-docker-compose build wterm
-docker-compose up -d wterm
+cd ~/Documents/project/wterm/deploy/cloudflared
+docker compose up -d --build wterm
 ```
 
 The `cloudflared` container does not need rebuilding unless the tunnel config changes.
@@ -252,7 +208,7 @@ The `cloudflared` container does not need rebuilding unless the tunnel config ch
 ## Troubleshooting
 
 **Login fails / 401 errors**
-- Check `WTERM_PASSWORD` and `TOKEN_SECRET` are set in `.env`
+- Check `WTERM_PASSWORD` and `TOKEN_SECRET` are set in `.env`.
 
 **appctl commands fail inside terminal**
 - Verify `/tmp/appctl.sock` exists in container: `docker exec wterm ls /tmp/appctl.sock`
@@ -265,8 +221,8 @@ The `cloudflared` container does not need rebuilding unless the tunnel config ch
 
 **adb devices shows nothing**
 - Make sure ADB server is running on macOS: `adb start-server`
-- Verify port 5037 socat forward is active in the container
+- Verify port 5037 socat forward is active in the container.
 
 **Cloudflare tunnel not connecting**
-- Check credentials path in `.env` matches the actual file location
-- Run `cloudflared tunnel info <tunnel-id>` to verify the tunnel exists
+- Check the credentials path in `.env` matches the actual file location.
+- Run `cloudflared tunnel info <tunnel-id>` to verify the tunnel exists.

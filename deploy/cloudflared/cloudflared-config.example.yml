@@ -1,0 +1,18 @@
+# Cloudflare Tunnel ingress for wterm.
+# Copy to `cloudflared-config.yml` and set CLOUDFLARED_CONFIG in .env to its
+# absolute path. Replace the tunnel id and hostnames below.
+
+tunnel: REPLACE_WITH_TUNNEL_ID
+credentials-file: /etc/cloudflared/credentials.json
+
+protocol: http2
+
+ingress:
+  # Optional: route an openvscode-server running on the host.
+  # - hostname: code.example.com
+  #   service: http://host.docker.internal:3002
+
+  - hostname: terminal.example.com
+    service: http://wterm:3001
+
+  - service: http_status:404

@@ -83,6 +83,15 @@ pnpm --filter nextjs dev
 zig build test
 ```
 
+## Deployment
+
+Reference Compose stacks live under [`deploy/`](deploy/):
+
+- [`deploy/cloudflared/`](deploy/cloudflared/) — laptop/workstation behind a Cloudflare Tunnel
+- [`deploy/traefik/`](deploy/traefik/) — server behind Traefik
+
+See [`deploy/README.md`](deploy/README.md) for the variant overview and [`app/DEPLOYMENT.md`](app/DEPLOYMENT.md) for the full laptop walkthrough.
+
 ## License
 
 Apache-2.0
