@@ -40,6 +40,8 @@ services:
       - ${CLOUDFLARED_CREDENTIALS}:/etc/cloudflared/credentials.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
     depends_on:
       - wterm
 
