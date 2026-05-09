@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Columns2, Rows2, X, Cpu, MemoryStick, HardDrive, Terminal as TermIcon,
-  Zap, LogOut, Search, Plus, PanelLeft, LayoutTemplate, Code2, Copy, Folder, Monitor,
+  LogOut, Search, Plus, PanelLeft, LayoutTemplate, Code2, Copy, Folder, Monitor,
 } from "lucide-react";
 import { PaneTerminal, PaneHandle, GitInfo } from "./Pane";
 import { FileBrowser } from "./FileBrowser";
@@ -471,10 +471,6 @@ export default function App() {
     setNames((n) => ({ ...n, [id]: name }));
   }, []);
 
-  const sendAppctl = useCallback(() => {
-    paneRefs.current.get(focusedId)?.send("appctl\r");
-  }, [focusedId]);
-
   const importForwarded = useCallback((fwd: ForwardedTerminalInfo) => {
     const sessionId = `fwd-${fwd.id}`;
     if (root) {
@@ -711,9 +707,6 @@ export default function App() {
                   <div className="text-xs text-zinc-700">loading…</div>
                 )}
                 <div className="flex items-center pt-1">
-                  <button onClick={sendAppctl} className="flex items-center gap-1 rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-300 hover:bg-blue-600 hover:text-white transition-colors">
-                    <Zap size={10} /> appctl
-                  </button>
                   <button onClick={handleLogout} title="Sign out" className="ml-auto rounded p-1 text-zinc-600 hover:bg-zinc-700 hover:text-zinc-300">
                     <LogOut size={12} />
                   </button>
@@ -819,8 +812,8 @@ export default function App() {
             <span className="text-zinc-700">loading stats…</span>
           )}
           <div className="ml-auto">
-            <button onClick={sendAppctl} className="flex items-center gap-1.5 rounded bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-blue-600 hover:text-white transition-colors">
-              <Zap size={11} /> appctl
+            <button onClick={handleLogout} title="Sign out" className="rounded p-1 text-zinc-600 hover:bg-zinc-700 hover:text-zinc-300">
+              <LogOut size={12} />
             </button>
           </div>
         </div>

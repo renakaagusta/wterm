@@ -61,12 +61,6 @@ RUN npm install -g @anthropic-ai/claude-code agent-browser 2>&1 | tail -3
 # Install Linux adb for direct ADB server communication (port 5037 forwarded to macOS)
 RUN apt-get update && apt-get install -y android-tools-adb && rm -rf /var/lib/apt/lists/*
 
-# Wrapper scripts for macOS-native Android tools — proxy through appctl host-exec
-RUN printf '#!/bin/bash\nappctl host-exec "~/Library/Android/sdk/emulator/emulator $* 2>&1"\n' > /usr/local/bin/emulator && \
-    printf '#!/bin/bash\nappctl host-exec "~/Library/Android/sdk/cmdline-tools/latest/bin/sdkmanager $*"\n' > /usr/local/bin/sdkmanager && \
-    printf '#!/bin/bash\nappctl host-exec "~/Library/Android/sdk/cmdline-tools/latest/bin/avdmanager $*"\n' > /usr/local/bin/avdmanager && \
-    printf '#!/bin/bash\nappctl host-exec "~/Library/Android/sdk/platform-tools/fastboot $*"\n' > /usr/local/bin/fastboot && \
-    chmod +x /usr/local/bin/emulator /usr/local/bin/sdkmanager /usr/local/bin/avdmanager /usr/local/bin/fastboot
 
 COPY --from=builder /build/app/dist    ./dist
 COPY --from=builder /build/app/server.mjs ./
@@ -78,15 +72,12 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     WORKSPACE_FILE=/data/workspace.json \
     SHELL_USER=renakaagusta \
-    PATH="/opt/appctl/node_modules/.bin:/opt/appctl:${PATH}" \
     AGENT_BROWSER_SCREENSHOT_DIR=/Users/renakaagusta/.cache/agent-browser
 
 # Create non-root shell user with home dir pointing to the bind-mounted host home
 RUN useradd -u 1000 -g 1000 -s /bin/bash -d /Users/renakaagusta -M renakaagusta 2>/dev/null || \
     useradd -s /bin/bash -d /Users/renakaagusta -M renakaagusta 2>/dev/null || true
 
-# appctl symlink (actual dir is bind-mounted at runtime)
-RUN ln -s /opt/appctl/cli.mjs /usr/local/bin/appctl || true
 
 EXPOSE 3001
 
