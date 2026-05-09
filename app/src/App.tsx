@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Columns2, Rows2, X, Cpu, MemoryStick, HardDrive, Terminal as TermIcon,
-  LogOut, Search, Plus, PanelLeft, LayoutTemplate, Code2, Copy, Folder, Monitor,
+  LogOut, Search, Plus, PanelLeft, LayoutTemplate, PanelBottom, Code2, Copy, Folder, Monitor,
 } from "lucide-react";
 import { PaneTerminal, PaneHandle, GitInfo } from "./Pane";
 import { FileBrowser } from "./FileBrowser";
@@ -103,7 +103,7 @@ function computeLayouts(
 
 // ─── Workspace persistence ───────────────────────────────────────────────────
 
-type ViewMode = "split" | "tabs";
+type ViewMode = "split" | "tabs" | "bottom-tabs";
 interface Workspace { root: PaneNode; focusedId: string; names?: Record<string, string>; viewMode?: ViewMode; sessionCwds?: Record<string, string> }
 
 async function fetchWorkspace(): Promise<Workspace | null> {
@@ -292,6 +292,88 @@ function SidebarItem({ id, sessionId, name, cwd, gitInfo, isActive, vscodeConfig
           </svg>
         </button>
       </div>
+    </div>
+  );
+}
+
+// ─── Bottom tab item ─────────────────────────────────────────────────────────
+
+interface BottomTabItemProps {
+  id: string;
+  name: string;
+  cwd: string;
+  gitInfo?: GitInfo;
+  isActive: boolean;
+  onSelect: () => void;
+  onClose: () => void;
+  onRename: (name: string) => void;
+}
+
+function BottomTabItem({ name, cwd, gitInfo, isActive, onSelect, onClose, onRename }: BottomTabItemProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (!editing) setDraft(name); }, [name, editing]);
+  useEffect(() => { if (editing) inputRef.current?.select(); }, [editing]);
+
+  function commitRename() {
+    const trimmed = draft.trim();
+    if (trimmed) onRename(trimmed);
+    else setDraft(name);
+    setEditing(false);
+  }
+
+  const lastSegment = cwd ? (cwd.split("/").filter(Boolean).at(-1) ?? null) : null;
+
+  return (
+    <div
+      className={`group/tab relative flex shrink-0 cursor-pointer select-none items-center gap-1.5 border-r border-zinc-800/60 px-3 py-0 text-xs transition-colors
+        ${isActive ? "bg-zinc-800/80 text-zinc-200" : "text-zinc-500 hover:bg-zinc-800/40 hover:text-zinc-300"}`}
+      onClick={onSelect}
+      onDoubleClick={() => setEditing(true)}
+    >
+      {/* Top active indicator */}
+      {isActive && <div className="absolute inset-x-0 top-0 h-px bg-zinc-400" />}
+
+      <svg width="11" height="11" viewBox="0 0 13 13" fill="none" className={`shrink-0 ${isActive ? "text-zinc-400" : "text-zinc-600"}`}>
+        <path d="M2 3.5l3.5 3-3.5 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d="M7.5 9.5h3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      </svg>
+
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitRename}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitRename();
+            if (e.key === "Escape") { setDraft(name); setEditing(false); }
+            e.stopPropagation();
+          }}
+          onClick={(e) => e.stopPropagation()}
+          className="w-24 rounded bg-zinc-700 px-1 py-0.5 text-xs text-zinc-200 outline-none focus:ring-1 focus:ring-blue-500"
+        />
+      ) : (
+        <span className="max-w-[100px] truncate font-medium">{name}</span>
+      )}
+
+      {!editing && lastSegment && (
+        <span className="truncate text-[10px] text-zinc-600">{lastSegment}</span>
+      )}
+
+      {!editing && gitInfo?.branch && (
+        <span className="shrink-0 text-[10px] text-zinc-600">⎇ {gitInfo.branch}</span>
+      )}
+
+      <button
+        onClick={(e) => { e.stopPropagation(); onClose(); }}
+        title="Close"
+        className="ml-1 shrink-0 rounded p-0.5 text-zinc-700 opacity-0 transition-opacity group-hover/tab:opacity-100 hover:text-red-400"
+      >
+        <X size={10} />
+      </button>
     </div>
   );
 }
@@ -585,6 +667,13 @@ export default function App() {
             <PanelLeft size={13} />
           </button>
           <button
+            onClick={() => setViewMode("bottom-tabs")}
+            title="Bottom tabs mode"
+            className={`rounded p-1 text-xs transition-colors ${viewMode === "bottom-tabs" ? "bg-zinc-700 text-zinc-200" : "text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300"}`}
+          >
+            <PanelBottom size={13} />
+          </button>
+          <button
             onClick={() => setViewMode("split")}
             title="Split mode"
             className={`rounded p-1 text-xs transition-colors ${viewMode === "split" ? "bg-zinc-700 text-zinc-200" : "text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300"}`}
@@ -733,6 +822,77 @@ export default function App() {
           </>
         )}
 
+        {/* ── Bottom tabs mode ── */}
+        {viewMode === "bottom-tabs" && (
+          <div className="flex min-h-0 flex-1 flex-col">
+            {/* Terminal area */}
+            <div className="relative min-h-0 flex-1">
+              {terminals.map(({ id, sessionId }) => (
+                <div
+                  key={id}
+                  style={{
+                    position: "absolute", inset: 0,
+                    visibility: id === focusedId ? "visible" : "hidden",
+                    zIndex: id === focusedId ? 1 : 0,
+                    pointerEvents: id === focusedId ? "auto" : "none",
+                  }}
+                >
+                  {renderPaneTerminal(id, sessionId)}
+                </div>
+              ))}
+            </div>
+
+            {/* Bottom tab bar */}
+            <div className="flex h-9 shrink-0 items-stretch border-t border-zinc-800 bg-zinc-950">
+              {/* Scrollable tab list */}
+              <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
+                {terminals.map((t) => (
+                  <BottomTabItem
+                    key={t.id}
+                    id={t.id}
+                    name={names[t.id] ?? "Terminal"}
+                    cwd={cwds[t.id] ?? ""}
+                    gitInfo={gitInfos[t.id]}
+                    isActive={t.id === focusedId}
+                    onSelect={() => setFocusedId(t.id)}
+                    onClose={() => closePane(t.id)}
+                    onRename={(name) => renamePane(t.id, name)}
+                  />
+                ))}
+              </div>
+
+              {/* Fixed right: add + stats + logout */}
+              <div className="flex shrink-0 items-center gap-3 border-l border-zinc-800 px-2 text-xs text-zinc-500">
+                <button
+                  onClick={addPane}
+                  title="New terminal (⌘T)"
+                  className="rounded p-1 text-zinc-600 hover:bg-zinc-700 hover:text-zinc-200 transition-colors"
+                >
+                  <Plus size={13} />
+                </button>
+                {stats && (
+                  <>
+                    <div className="h-3.5 w-px bg-zinc-800" />
+                    <div className="flex items-center gap-1">
+                      <Cpu size={10} /><span>{stats.cpu}%</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <MemoryStick size={10} /><span>{fmt(stats.ram.used)}/{fmt(stats.ram.total)}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <HardDrive size={10} /><span>{fmt(stats.disk.used)}/{fmt(stats.disk.total)}</span>
+                    </div>
+                  </>
+                )}
+                <div className="h-3.5 w-px bg-zinc-800" />
+                <button onClick={handleLogout} title="Sign out" className="rounded p-1 text-zinc-600 hover:bg-zinc-700 hover:text-zinc-300">
+                  <LogOut size={12} />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── Split mode ── */}
         {viewMode === "split" && (
           <>
@@ -791,7 +951,7 @@ export default function App() {
         );
       })()}
 
-      {/* Bottom status bar — split mode only (tabs mode has its own in the sidebar) */}
+      {/* Bottom status bar — split mode only (tabs/bottom-tabs modes have their own) */}
       {viewMode === "split" && (
         <div className="flex items-center gap-4 border-t border-zinc-800 bg-zinc-950 px-3 py-1 text-xs text-zinc-500 select-none">
           {stats ? (
